@@ -11,12 +11,19 @@ sysctl -n hw.model
 
 ---
 
-## Where to Get the Files
+## Direct Downloads
 
-- **Mode 1 only (script runs directly on your current macOS)**:
-  Download [collect_2018_mac_diagnostics.command](https://raw.githubusercontent.com/cook0001/OpenCore-Legacy-Patcher/rd/2018-mac-support/2018-volunteer-kit/collect_2018_mac_diagnostics.command) (or `2018-Native-Capture-Kit.zip` from [Releases](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases)).
-- **Mode 2 (external USB debug OpenCore EFIs)**:
-  Download `<Model>-Diag-EFI.zip` for your Mac model from [Releases](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases).
+Release page: https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/tag/2018-volunteer-kit-v1 *(expand **Assets** at the bottom of the release, or click a direct link below)*
+
+| Model / Kit | Purpose | Direct Download |
+|---|---|---|
+| All 2018 Macs (`Mode 1` / `Mode 3`) | Read-only collector + guide | [2018-Native-Capture-Kit.zip](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/download/2018-volunteer-kit-v1/2018-Native-Capture-Kit.zip) |
+| `MacBookAir8,1` (`Mode 2`) | External USB Debug EFI + collector | [MacBookAir8.1-Diag-EFI.zip](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/download/2018-volunteer-kit-v1/MacBookAir8.1-Diag-EFI.zip) |
+| `MacBookPro15,1` (`Mode 2`) | External USB Debug EFI + collector | [MacBookPro15.1-Diag-EFI.zip](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/download/2018-volunteer-kit-v1/MacBookPro15.1-Diag-EFI.zip) |
+| `MacBookPro15,2` (`Mode 2`) | External USB Debug EFI + collector | [MacBookPro15.2-Diag-EFI.zip](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/download/2018-volunteer-kit-v1/MacBookPro15.2-Diag-EFI.zip) |
+| `Macmini8,1` (`Mode 2`) | External USB Debug EFI + collector | [Macmini8.1-Diag-EFI.zip](https://github.com/cook0001/OpenCore-Legacy-Patcher/releases/download/2018-volunteer-kit-v1/Macmini8.1-Diag-EFI.zip) |
+
+Or download the Mode 1 script directly: [collect_2018_mac_diagnostics.command](https://raw.githubusercontent.com/cook0001/OpenCore-Legacy-Patcher/rd/2018-mac-support/2018-volunteer-kit/collect_2018_mac_diagnostics.command).
 
 Note on macOS Gatekeeper: Running via `zsh ./collect_2018_mac_diagnostics.command` in Terminal works directly without needing Xcode Command Line Tools, Homebrew, or `chmod +x`, and avoids Finder's unsigned `.command` double-click block.
 

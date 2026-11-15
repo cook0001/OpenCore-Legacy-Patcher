@@ -64,17 +64,36 @@ if (( ${#ASSETS} == 0 )); then
     echo "No ZIP archives found in $DIST_DIR; run build_volunteer_kit.py first." >&2
     exit 1
 fi
+RELEASE_NOTES=$(cat <<'EOF'
+Volunteer capture bundles for **2018 T2 Macs** (`MacBookAir8,1`, `MacBookPro15,1`, `MacBookPro15,2`, `Macmini8,1`).
+
+### Direct Downloads
+
+- **Mode 1 / Mode 3 (Native Collector + Guide)**: [2018-Native-Capture-Kit.zip](https://github.com/__REPO__/releases/download/__TAG__/2018-Native-Capture-Kit.zip)
+- **Mode 2 (`MacBookAir8,1` Debug USB EFI)**: [MacBookAir8.1-Diag-EFI.zip](https://github.com/__REPO__/releases/download/__TAG__/MacBookAir8.1-Diag-EFI.zip)
+- **Mode 2 (`MacBookPro15,1` Debug USB EFI)**: [MacBookPro15.1-Diag-EFI.zip](https://github.com/__REPO__/releases/download/__TAG__/MacBookPro15.1-Diag-EFI.zip)
+- **Mode 2 (`MacBookPro15,2` Debug USB EFI)**: [MacBookPro15.2-Diag-EFI.zip](https://github.com/__REPO__/releases/download/__TAG__/MacBookPro15.2-Diag-EFI.zip)
+- **Mode 2 (`Macmini8,1` Debug USB EFI)**: [Macmini8.1-Diag-EFI.zip](https://github.com/__REPO__/releases/download/__TAG__/Macmini8.1-Diag-EFI.zip)
+
+Full instructions: https://github.com/__REPO__/blob/rd/2018-mac-support/2018-volunteer-kit/README.md
+Post your `2018-mac-diag-*.zip` bundle: https://github.com/__REPO__/issues
+EOF
+)
+RELEASE_NOTES="${RELEASE_NOTES//__REPO__/$REPO}"
+RELEASE_NOTES="${RELEASE_NOTES//__TAG__/$RELEASE_TAG}"
+
 if gh release view "$RELEASE_TAG" --repo "$REPO" >/dev/null 2>&1; then
-    echo "Updating release $RELEASE_TAG assets ..."
+    echo "Updating release $RELEASE_TAG assets and notes ..."
     gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --repo "$REPO" --clobber
+    gh release edit "$RELEASE_TAG" --repo "$REPO" --prerelease=false --latest --title "2018 T2 Mac Volunteer Capture Kit" --notes "$RELEASE_NOTES"
 else
-    echo "Creating prerelease $RELEASE_TAG with volunteer diagnostic EFIs ..."
+    echo "Creating release $RELEASE_TAG with volunteer diagnostic EFIs ..."
     gh release create "$RELEASE_TAG" "${ASSETS[@]}" \
         --repo "$REPO" \
         --target "rd/2018-mac-support" \
-        --prerelease \
+        --latest \
         --title "2018 T2 Mac Volunteer Capture Kit" \
-        --notes-file "$SCRIPT_DIR/README.md"
+        --notes "$RELEASE_NOTES"
 fi
 
 echo "Done! Release and Issue intake configured for $REPO."
