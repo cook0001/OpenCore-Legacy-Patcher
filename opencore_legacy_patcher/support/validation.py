@@ -68,8 +68,12 @@ class PatcherValidation:
         ]
 
         self.valid_dumps_native = [
-            example_data.iMac.iMac201_Stock,
+            example_data.MacBookAir.MacBookAir81_Stock,
             example_data.MacBookPro.MacBookPro141_SSD_Upgrade,
+            example_data.MacBookPro.MacBookPro151_Stock,
+            example_data.MacBookPro.MacBookPro152_Stock,
+            example_data.Macmini.Macmini81_Stock,
+            example_data.iMac.iMac201_Stock,
         ]
 
         self._validate_configs()
@@ -101,7 +105,7 @@ class PatcherValidation:
         Then validate against ocvalidate
         """
 
-        for model in self.valid_dumps:
+        for model in self.valid_dumps + self.valid_dumps_native:
             self.constants.computer = model
             self.constants.custom_model = ""
             logging.info(f"Validating dumped model: {self.constants.computer.real_model}")

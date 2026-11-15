@@ -30,6 +30,27 @@ class MacBook:
         opencore_version=None,
     )
 
+class MacBookAir:
+
+    MacBookAir81_Stock = device_probe.Computer(
+        real_model="MacBookAir8,1",
+        real_board_id="Mac-827FAC58A8FDFA22",
+        reported_model="MacBookAir8,1",
+        reported_board_id="Mac-827FAC58A8FDFA22",
+        gpus=[device_probe.Intel(vendor_id=32902, device_id=34752, class_code=196608, name="IGPU", model="Intel UHD Graphics 617", pci_path="PciRoot(0x0)/Pci(0x2,0x0)")],
+        igpu=device_probe.Intel(vendor_id=32902, device_id=34752, class_code=196608, name="IGPU", model="Intel UHD Graphics 617", pci_path="PciRoot(0x0)/Pci(0x2,0x0)"),
+        dgpu=None,
+        storage=[],
+        wifi=device_probe.Broadcom(vendor_id=5348, device_id=17372, class_code=163840, name="ARPT", model=None, pci_path="PciRoot(0x0)/Pci(0x1c,0x0)/Pci(0x0,0x0)"),
+        cpu=device_probe.CPU(
+            name="Intel(R) Core(TM) i5-8210Y CPU @ 1.60GHz",
+            flags=["FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "SEP", "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE36", "CLFSH", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "PBE", "SSE3", "PCLMULQDQ", "DTES64", "MON", "DSCPL", "VMX", "SMX", "EST", "TM2", "SSSE3", "FMA", "CX16", "TPR", "PDCM", "SSE4.1", "SSE4.2", "x2APIC", "MOVBE", "POPCNT", "AES", "PCID", "XSAVE", "OSXSAVE", "SEGLIM64", "TSCTMR", "AVX1.0", "RDRAND", "F16C"],
+            leafs=[],
+        ),
+        oclp_version=None,
+        opencore_version=None,
+    )
+
 class MacBookPro:
 
     MacBookPro92_Stock = device_probe.Computer(
@@ -149,6 +170,47 @@ class MacBookPro:
         opencore_version=None,
         bluetooth_chipset=None,
         third_party_sata_ssd=False)
+
+    MacBookPro151_Stock = device_probe.Computer(
+        real_model="MacBookPro15,1",
+        real_board_id="Mac-937A206F2EE63C01",
+        reported_model="MacBookPro15,1",
+        reported_board_id="Mac-937A206F2EE63C01",
+        gpus=[
+            device_probe.Intel(vendor_id=32902, device_id=16027, class_code=196608, name="IGPU", model="Intel UHD Graphics 630", pci_path="PciRoot(0x0)/Pci(0x2,0x0)"),
+            device_probe.AMD(vendor_id=4098, device_id=26607, class_code=196608, name="GFX0", model="AMD Radeon Pro 560X", pci_path="PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)"),
+        ],
+        igpu=device_probe.Intel(vendor_id=32902, device_id=16027, class_code=196608, name="IGPU", model="Intel UHD Graphics 630", pci_path="PciRoot(0x0)/Pci(0x2,0x0)"),
+        dgpu=device_probe.AMD(vendor_id=4098, device_id=26607, class_code=196608, name="GFX0", model="AMD Radeon Pro 560X", pci_path="PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)"),
+        storage=[],
+        wifi=device_probe.Broadcom(vendor_id=5348, device_id=17508, class_code=163840, name="ARPT", model=None, pci_path="PciRoot(0x0)/Pci(0x1c,0x0)/Pci(0x0,0x0)"),
+        cpu=device_probe.CPU(
+            name="Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz",
+            flags=["FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "SEP", "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE36", "CLFSH", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "PBE", "SSE3", "PCLMULQDQ", "DTES64", "MON", "DSCPL", "VMX", "SMX", "EST", "TM2", "SSSE3", "FMA", "CX16", "TPR", "PDCM", "SSE4.1", "SSE4.2", "x2APIC", "MOVBE", "POPCNT", "AES", "PCID", "XSAVE", "OSXSAVE", "SEGLIM64", "TSCTMR", "AVX1.0", "RDRAND", "F16C"],
+            leafs=[],
+        ),
+        oclp_version=None,
+        opencore_version=None,
+    )
+
+    MacBookPro152_Stock = device_probe.Computer(
+        real_model="MacBookPro15,2",
+        real_board_id="Mac-827FB448E656EC26",
+        reported_model="MacBookPro15,2",
+        reported_board_id="Mac-827FB448E656EC26",
+        gpus=[device_probe.Intel(vendor_id=32902, device_id=16037, class_code=196608, name="IGPU", model="Intel Iris Plus Graphics 655", pci_path="PciRoot(0x0)/Pci(0x2,0x0)")],
+        igpu=device_probe.Intel(vendor_id=32902, device_id=16037, class_code=196608, name="IGPU", model="Intel Iris Plus Graphics 655", pci_path="PciRoot(0x0)/Pci(0x2,0x0)"),
+        dgpu=None,
+        storage=[],
+        wifi=device_probe.Broadcom(vendor_id=5348, device_id=17372, class_code=163840, name="ARPT", model=None, pci_path="PciRoot(0x0)/Pci(0x1c,0x0)/Pci(0x0,0x0)"),
+        cpu=device_probe.CPU(
+            name="Intel(R) Core(TM) i5-8259U CPU @ 2.30GHz",
+            flags=["FPU", "VME", "DE", "PSE", "TSC", "MSR", "PAE", "MCE", "CX8", "APIC", "SEP", "MTRR", "PGE", "MCA", "CMOV", "PAT", "PSE36", "CLFSH", "DS", "ACPI", "MMX", "FXSR", "SSE", "SSE2", "SS", "HTT", "TM", "PBE", "SSE3", "PCLMULQDQ", "DTES64", "MON", "DSCPL", "VMX", "SMX", "EST", "TM2", "SSSE3", "FMA", "CX16", "TPR", "PDCM", "SSE4.1", "SSE4.2", "x2APIC", "MOVBE", "POPCNT", "AES", "PCID", "XSAVE", "OSXSAVE", "SEGLIM64", "TSCTMR", "AVX1.0", "RDRAND", "F16C"],
+            leafs=[],
+        ),
+        oclp_version=None,
+        opencore_version=None,
+    )
 
     MacBookPro171_Stock = device_probe.Computer(
         # Run under Rosetta

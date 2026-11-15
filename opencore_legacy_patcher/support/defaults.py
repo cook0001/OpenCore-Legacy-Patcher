@@ -142,18 +142,20 @@ class GenerateDefaults:
                 # Hardware Detection will never hit this
                 self.constants.serial_settings = "Minimal"
 
-        # Check if model uses T2 SMBIOS, if so see if it needs root patching (determined earlier on via SIP variable)
-        # If not, allow SecureBootModel usage, otherwise force VMM patching
-        # Needed for macOS Monterey to allow OTA updates
-        try:
-            spoof_model = generate_smbios.set_smbios_model_spoof(self.model)
-        except:
-            # Native Macs (mainly M1s) will error out as they don't know what SMBIOS to spoof to
-            # As we don't spoof on native models, we can safely ignore this
-            spoof_model = self.model
+        # Check if effective SMBIOS uses T2 SecureBootModel; if so and root patching is needed (broken .im4m seal), disable SBM and force VMM
+        if self.constants.override_smbios != "Default":
+            target_model = self.constants.override_smbios
+        elif self.constants.serial_settings != "None" and self.constants.allow_native_spoofs is False:
+            try:
+                target_model = generate_smbios.set_smbios_model_spoof(self.model)
+            except Exception:
+                # Native Macs (mainly M1s) will error out as they don't know what SMBIOS to spoof to
+                target_model = self.model
+        else:
+            target_model = self.model
 
-        if spoof_model in smbios_data.smbios_dictionary:
-            if smbios_data.smbios_dictionary[spoof_model]["SecureBootModel"] is not None:
+        if target_model in smbios_data.smbios_dictionary:
+            if smbios_data.smbios_dictionary[target_model]["SecureBootModel"] is not None:
                 if self.constants.sip_status is False:
                     # Force VMM as root patching breaks .im4m signature
                     self.constants.secure_status = False
@@ -242,7 +244,6 @@ class GenerateDefaults:
         # 14.0: Modern Wireless chipsets require root patching
         if self.model in smbios_data.smbios_dictionary:
             if smbios_data.smbios_dictionary[self.model]["Max OS Supported"] < os_data.os_data.sonoma:
-                self.constants.sip_status = True
                 self.constants.sip_status = False
                 self.constants.secure_status = False
                 self.constants.disable_cs_lv = True

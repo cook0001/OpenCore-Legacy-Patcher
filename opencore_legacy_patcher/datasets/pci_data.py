@@ -1099,6 +1099,7 @@ class intel_ids:
         0x5926,  # Iris Plus Graphics 640
         0x5927,  # Iris Plus Graphics 650
         0x5923,  # HD Graphics 635
+        0x87C0,  # UHD Graphics 617
     ]
 
     coffee_lake_ids = [

@@ -5,6 +5,7 @@ graphics_audio.py: Class for handling Graphics and Audio Patches, invocation fro
 import shutil
 import logging
 import binascii
+import plistlib
 
 from pathlib import Path
 
@@ -410,6 +411,19 @@ class BuildGraphicsAudio:
             support.BuildSupport(self.model, self.constants, self.config).get_efi_binary_by_path("NVGOP_GK.efi", "UEFI", "Drivers")["Enabled"] = True
 
 
+    def _add_plist_override(self, label: str, relative_plist: str, personality: str, map_key: str, kext_folder: Path, contents_folder: Path, bundle_name: str) -> bool:
+        map_path = Path(self.constants.plist_folder_path) / Path(relative_plist)
+        with map_path.open("rb") as file:
+            plist_data = plistlib.load(file)
+        if self.model not in plist_data.get("IOKitPersonalities", {}).get(personality, {}).get(map_key, {}):
+            return False
+        logging.info(f"- Adding {label} Override")
+        Path(kext_folder).mkdir()
+        Path(contents_folder).mkdir()
+        shutil.copy(map_path, contents_folder)
+        support.BuildSupport(self.model, self.constants, self.config).get_kext_by_bundle_path(bundle_name)["Enabled"] = True
+        return True
+
     def _spoof_handling(self) -> None:
         """
         SMBIOS Spoofing Handler
@@ -420,29 +434,38 @@ class BuildGraphicsAudio:
 
         # AppleMuxControl Override
         if self.model == "MacBookPro9,1":
-            logging.info("- Adding AppleMuxControl Override")
-            amc_map_path = Path(self.constants.plist_folder_path) / Path("AppleMuxControl/Info.plist")
-            self.config["DeviceProperties"]["Add"]["PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)"] = {"agdpmod": "vit9696"}
-            Path(self.constants.amc_kext_folder).mkdir()
-            Path(self.constants.amc_contents_folder).mkdir()
-            shutil.copy(amc_map_path, self.constants.amc_contents_folder)
-            support.BuildSupport(self.model, self.constants, self.config).get_kext_by_bundle_path("AMC-Override.kext")["Enabled"] = True
+            if self._add_plist_override(
+                "AppleMuxControl",
+                "AppleMuxControl/Info.plist",
+                "AppleMuxControl",
+                "ConfigMap",
+                self.constants.amc_kext_folder,
+                self.constants.amc_contents_folder,
+                "AMC-Override.kext",
+            ):
+                self.config["DeviceProperties"]["Add"]["PciRoot(0x0)/Pci(0x1,0x0)/Pci(0x0,0x0)"] = {"agdpmod": "vit9696"}
 
         if self.model not in model_array.NoAGPMSupport:
-            logging.info("- Adding AppleGraphicsPowerManagement Override")
-            agpm_map_path = Path(self.constants.plist_folder_path) / Path("AppleGraphicsPowerManagement/Info.plist")
-            Path(self.constants.agpm_kext_folder).mkdir()
-            Path(self.constants.agpm_contents_folder).mkdir()
-            shutil.copy(agpm_map_path, self.constants.agpm_contents_folder)
-            support.BuildSupport(self.model, self.constants, self.config).get_kext_by_bundle_path("AGPM-Override.kext")["Enabled"] = True
+            self._add_plist_override(
+                "AppleGraphicsPowerManagement",
+                "AppleGraphicsPowerManagement/Info.plist",
+                "AGPM",
+                "Machines",
+                self.constants.agpm_kext_folder,
+                self.constants.agpm_contents_folder,
+                "AGPM-Override.kext",
+            )
 
         if self.model in model_array.AGDPSupport:
-            logging.info("- Adding AppleGraphicsDevicePolicy Override")
-            agdp_map_path = Path(self.constants.plist_folder_path) / Path("AppleGraphicsDevicePolicy/Info.plist")
-            Path(self.constants.agdp_kext_folder).mkdir()
-            Path(self.constants.agdp_contents_folder).mkdir()
-            shutil.copy(agdp_map_path, self.constants.agdp_contents_folder)
-            support.BuildSupport(self.model, self.constants, self.config).get_kext_by_bundle_path("AGDP-Override.kext")["Enabled"] = True
+            self._add_plist_override(
+                "AppleGraphicsDevicePolicy",
+                "AppleGraphicsDevicePolicy/Info.plist",
+                "AppleGraphicsDevicePolicy",
+                "ConfigMap",
+                self.constants.agdp_kext_folder,
+                self.constants.agdp_contents_folder,
+                "AGDP-Override.kext",
+            )
 
         # AGPM Patch
         if self.model in model_array.DualGPUPatch:
