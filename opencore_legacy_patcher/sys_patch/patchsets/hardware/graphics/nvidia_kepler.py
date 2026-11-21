@@ -128,21 +128,6 @@ class NvidiaKepler(BaseHardware):
         }
 
 
-    def _mixed_gpu_patches(self) -> dict:
-        if self._xnu_major < os_data.tahoe or self._is_gpu_architecture_present([device_probe.Intel.Archs.Haswell]) is False:
-            return {}
-
-        return {
-            "Nvidia Kepler OpenCL": {
-                PatchType.MERGE_SYSTEM_VOLUME: {
-                    "/System/Library/Frameworks": {
-                        "OpenCL.framework": "12.5",
-                    },
-                },
-            },
-        }
-
-
     def patches(self) -> dict:
         """
         Patches for Nvidia Kepler GPUs
@@ -152,10 +137,9 @@ class NvidiaKepler(BaseHardware):
 
         return {
             **LegacyMetal3802(self._xnu_major, self._xnu_minor, self._constants.detected_os_version).patches(),
-            **MontereyOpenCL(self._xnu_major, self._xnu_minor, self._constants.detected_os_version).patches(),
             **BigSurOpenCL(self._xnu_major, self._xnu_minor, self._constants.detected_os_version).patches(),
+            **MontereyOpenCL(self._xnu_major, self._xnu_minor, self._constants.detected_os_version).patches(),
             **MontereyWebKit(self._xnu_major, self._xnu_minor, self._os_build).patches(),
             **TahoeGraphics(self._xnu_major, self._xnu_minor, self._constants.detected_os_version).patches(),
             **self._model_specific_patches(),
-            **self._mixed_gpu_patches(),
         }

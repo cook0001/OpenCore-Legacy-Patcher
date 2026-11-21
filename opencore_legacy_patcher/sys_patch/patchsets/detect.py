@@ -113,12 +113,12 @@ class HardwarePatchsetDetection:
             intel_iron_lake.IntelIronLake,
             intel_sandy_bridge.IntelSandyBridge,
             intel_ivy_bridge.IntelIvyBridge,
+            nvidia_kepler.NvidiaKepler,
             intel_haswell.IntelHaswell,
             intel_broadwell.IntelBroadwell,
             intel_skylake.IntelSkylake,
 
             nvidia_tesla.NvidiaTesla,
-            nvidia_kepler.NvidiaKepler,
             nvidia_webdriver.NvidiaWebDriver,
 
             amd_terascale_1.AMDTeraScale1,
