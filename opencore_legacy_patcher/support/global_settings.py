@@ -82,6 +82,32 @@ class GlobalEnviromentSettings:
                 logging.info("Failed to write to global settings file")
 
 
+    def reset_settings(self, preserve_keys: list = None) -> bool:
+        """
+        Resets the global settings file on disk, optionally preserving specified keys
+        """
+        preserved = {}
+        for key in (preserve_keys or []):
+            val = self.read_property(key)
+            if val is not None:
+                preserved[key] = val
+
+        plist_path = Path(self.global_settings_plist)
+        try:
+            if plist_path.exists():
+                plist_path.unlink()
+            self._generate_settings_file()
+            for key, val in preserved.items():
+                self.write_property(key, val)
+            return True
+        except PermissionError as e:
+            logging.error(f"Permission error resetting global settings file: {e}")
+            return False
+        except OSError as e:
+            logging.error(f"Error resetting global settings file: {e}")
+            return False
+
+
     def _generate_settings_file(self) -> None:
         if Path(self.global_settings_plist).exists():
             return

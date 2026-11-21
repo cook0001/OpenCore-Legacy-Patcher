@@ -39,11 +39,37 @@ class SettingsFrame(wx.Frame):
     """
     Modal-based Settings Frame
     """
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None):
+
+    _APP_ONLY_SETTINGS = frozenset({
+        "IgnoreAppUpdates",
+        "DisableCrashAndAnalyticsReporting",
+        "ShouldNukeKDKs",
+        "MacBookPro_TeraScale_2_Accel",
+    })
+
+    _RESETTABLE_CONSTANTS = (
+        "allow_oc_everywhere", "ignore_updates", "should_nuke_kdks", "custom_model",
+        "opencore_debug", "boot_efi", "showpicker", "nvram_write", "oc_timeout",
+        "kext_debug", "kext_variant", "verbose_debug", "serial_settings",
+        "override_smbios", "allow_native_spoofs", "custom_serial_number",
+        "custom_board_serial_number", "fu_status", "fu_arguments", "sip_status",
+        "secure_status", "vault", "disable_cs_lv", "disable_amfi",
+        "firewire_boot", "nvme_boot", "xhci_boot", "allow_ts2_accel",
+        "drm_support", "force_nv_web", "force_output_support", "amd_gop_injection",
+        "nvidia_kepler_gop_injection", "metal_build", "imac_vendor", "imac_model",
+        "disallow_cpufriend", "enable_wake_on_wlan", "disable_tb", "dGPU_switch",
+        "force_surplus", "force_latest_psp", "disable_fw_throttle",
+        "software_demux", "force_vmm", "disable_connectdrivers", "set_vmm_cpuid",
+        "disable_mediaanalysisd", "set_alc_usage", "allow_3rd_party_drives",
+        "allow_nvme_fixing", "apfs_trim_timeout", "custom_sip_value",
+    )
+
+    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None, oc_settings_changed: bool = False):
         logging.info("Initializing Settings Frame")
         self.constants: constants.Constants = global_constants
         self.title: str = title
         self.parent: wx.Frame = parent
+        self.oc_settings_changed: bool = oc_settings_changed
 
         self.hyperlink_colour = (25, 179, 231)
 
@@ -91,11 +117,25 @@ class SettingsFrame(wx.Frame):
 
         sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
 
-        # Add return button
+        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+        reset_button = wx.Button(frame, label="Reset Settings", pos=(-1, -1), size=(130, 30))
+        reset_button.Bind(wx.EVT_BUTTON, self.on_reset_settings)
+        reset_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        button_sizer.Add(reset_button, 0, wx.ALL, 5)
+
+        self.rebuild_button = wx.Button(frame, label="Rebuild OpenCore", pos=(-1, -1), size=(150, 30))
+        self.rebuild_button.Bind(wx.EVT_BUTTON, self.on_rebuild_opencore)
+        self.rebuild_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        self.rebuild_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
+        button_sizer.Add(self.rebuild_button, 0, wx.ALL, 5)
+
         return_button = wx.Button(frame, label="Return", pos=(-1, -1), size=(100, 30))
         return_button.Bind(wx.EVT_BUTTON, self.on_return)
         return_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        sizer.Add(return_button, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+        button_sizer.Add(return_button, 0, wx.ALL, 5)
+
+        sizer.Add(button_sizer, 0, wx.ALIGN_CENTER | wx.BOTTOM | wx.TOP, 8)
 
         frame.SetSizer(sizer)
 
@@ -837,10 +877,8 @@ class SettingsFrame(wx.Frame):
             logging.info(f"Using Custom Model: {selection}")
             self.constants.custom_model = selection
             defaults.GenerateDefaults(self.constants.custom_model, False, self.constants)
-            self.parent.build_button.Enable()
 
-
-
+        self.parent.build_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
         self.parent.model_label.SetLabel(f"Model: {selection}")
         self.parent.model_label.Centre(wx.HORIZONTAL)
 
@@ -849,7 +887,8 @@ class SettingsFrame(wx.Frame):
             parent=self.parent,
             title=self.title,
             global_constants=self.constants,
-            screen_location=self.parent.GetPosition()
+            screen_location=self.parent.GetPosition(),
+            oc_settings_changed=True,
         )
 
 
@@ -1006,15 +1045,18 @@ Hardware Information:
                             event.GetEventObject().SetValue(not event.GetEventObject().GetValue())
                             return
         if override_function is True:
-            self.settings[self._find_parent_for_key(label)][label]["override_function"](self.settings[self._find_parent_for_key(label)][label]["variable"], value, self.settings[self._find_parent_for_key(label)][label]["constants_variable"] if "constants_variable" in self.settings[self._find_parent_for_key(label)][label] else None)
+            entry = self.settings[self._find_parent_for_key(label)][label]
+            if entry["variable"] not in self._APP_ONLY_SETTINGS:
+                self.oc_settings_changed = True
+            entry["override_function"](entry["variable"], value, entry.get("constants_variable"))
             return
 
         self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
+        self.oc_settings_changed = True
         if label == "Allow native models":
-            if gui_support.CheckProperties(self.constants).host_can_build() is True:
-                self.parent.build_button.Enable()
-            else:
-                self.parent.build_button.Disable()
+            can_build = gui_support.CheckProperties(self.constants).host_can_build()
+            self.parent.build_button.Enable(can_build)
+            self.rebuild_button.Enable(can_build)
 
 
     def on_spinctrl(self, event: wx.Event, label: str) -> None:
@@ -1022,6 +1064,7 @@ Hardware Information:
         """
         value = event.GetEventObject().GetValue()
         self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
+        self.oc_settings_changed = True
 
 
     def _update_setting(self, variable, value):
@@ -1073,6 +1116,7 @@ Hardware Information:
             self.constants.custom_sip_value = hex(self.sip_value)
             global_settings.GlobalEnviromentSettings().write_property("GUI:custom_sip_value", hex(self.sip_value))
 
+        self.oc_settings_changed = True
         self.sip_configured_label.SetLabel(f"Currently configured SIP: {hex(self.sip_value)}")
 
     def on_choice(self, event: wx.Event, label: str) -> None:
@@ -1080,6 +1124,7 @@ Hardware Information:
         """
         value = event.GetString()
         self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
+        self.oc_settings_changed = True
 
 
     def on_generate_serial_number(self, event: wx.Event) -> None:
@@ -1092,6 +1137,7 @@ Hardware Information:
         if len(macserial_output) == 2:
             self.custom_serial_number_textbox.SetValue(macserial_output[0])
             self.custom_board_serial_number_textbox.SetValue(macserial_output[1])
+            self.oc_settings_changed = True
         else:
             wx.MessageBox(f"Failed to generate serial number:\n\n{macserial_output}", "Error", wx.OK | wx.ICON_ERROR)
 
@@ -1099,11 +1145,13 @@ Hardware Information:
     def on_custom_serial_number_textbox(self, event: wx.Event) -> None:
         self.constants.custom_serial_number = event.GetEventObject().GetValue()
         global_settings.GlobalEnviromentSettings().write_property("GUI:custom_serial_number", self.constants.custom_serial_number)
+        self.oc_settings_changed = True
 
 
     def on_custom_board_serial_number_textbox(self, event: wx.Event) -> None:
         self.constants.custom_board_serial_number = event.GetEventObject().GetValue()
         global_settings.GlobalEnviromentSettings().write_property("GUI:custom_board_serial_number", self.constants.custom_board_serial_number)
+        self.oc_settings_changed = True
 
 
     def _populate_fu_override(self, panel: wx.Panel) -> None:
@@ -1123,6 +1171,7 @@ Hardware Information:
 
 
     def fu_selection_click(self, event: wx.Event) -> None:
+        self.oc_settings_changed = True
         value = event.GetEventObject().GetStringSelection()
         if value == "Enabled":
             logging.info("Updating FU Status: Enabled")
@@ -1168,6 +1217,7 @@ Hardware Information:
 
 
     def gpu_selection_click(self, event: wx.Event) -> None:
+        self.oc_settings_changed = True
         gpu_choice = event.GetEventObject().GetStringSelection()
 
         logging.info(f"Updating GPU Selection: {gpu_choice}")
@@ -1206,7 +1256,73 @@ Hardware Information:
             global_settings.GlobalEnviromentSettings().write_property("GUI:metal_build", False)
 
 
-    def on_return(self, event):
+    def on_reset_settings(self, event: wx.Event = None) -> None:
+        dlg = wx.MessageDialog(
+            self.frame_modal,
+            "Are you sure you want to reset all OpenCore Legacy Patcher settings back to their defaults?\n\nThis will remove saved overrides in /Users/Shared/.com.dortania.opencore-legacy-patcher.plist.",
+            "Reset Settings?",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
+        )
+        if dlg.ShowModal() != wx.ID_YES:
+            return
+
+        if not global_settings.GlobalEnviromentSettings().reset_settings(preserve_keys=["FirstLaunchWelcomeShown"]):
+            wx.MessageDialog(
+                self.frame_modal,
+                "Failed to reset settings file. Check permissions on /Users/Shared/.com.dortania.opencore-legacy-patcher.plist.",
+                "Error",
+                wx.OK | wx.ICON_ERROR,
+            ).ShowModal()
+            return
+
+        logging.info("Resetting settings to hardware defaults")
+        fresh = constants.Constants()
+        for attr in self._RESETTABLE_CONSTANTS:
+            setattr(self.constants, attr, getattr(fresh, attr))
+
+        defaults.GenerateDefaults(self.constants.computer.real_model, True, self.constants, ignore_settings_file=True)
+
+        self.parent.build_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
+        self.parent.model_label.SetLabel(f"Model: {self.constants.computer.real_model}")
+        self.parent.model_label.Centre(wx.HORIZONTAL)
+
+        self.frame_modal.Destroy()
+        SettingsFrame(
+            parent=self.parent,
+            title=self.title,
+            global_constants=self.constants,
+            screen_location=self.parent.GetPosition(),
+            oc_settings_changed=True,
+        )
+
+
+    def on_rebuild_opencore(self, event: wx.Event = None) -> None:
+        if not gui_support.CheckProperties(self.constants).host_can_build():
+            return
+        self.frame_modal.Destroy()
+        if hasattr(self.parent, "on_build_and_install"):
+            self.parent.on_build_and_install()
+        else:
+            from . import gui_build
+            gui_build.BuildFrame(
+                parent=None,
+                title=self.title,
+                global_constants=self.constants,
+                screen_location=self.parent.GetPosition() if self.parent else None,
+            )
+
+
+    def on_return(self, event: wx.Event = None):
+        if self.oc_settings_changed and gui_support.CheckProperties(self.constants).host_can_build():
+            dlg = wx.MessageDialog(
+                self.frame_modal,
+                "OpenCore build settings were modified.\n\nWould you like to apply these settings and rebuild OpenCore now?",
+                "Rebuild OpenCore?",
+                wx.YES_NO | wx.ICON_QUESTION,
+            )
+            if dlg.ShowModal() == wx.ID_YES:
+                self.on_rebuild_opencore()
+                return
         self.frame_modal.Destroy()
 
 
