@@ -15,10 +15,31 @@ import atexit
 
 from typing import Optional, Union
 from pathlib import Path
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from . import utilities
 
-SESSION = requests.Session()
+
+def _create_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        status=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["HEAD", "GET", "OPTIONS"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+SESSION = _create_session()
 
 
 class DownloadStatus(enum.Enum):
@@ -53,14 +74,9 @@ class NetworkUtilities:
         """
 
         try:
-            requests.head(self.url, timeout=5, allow_redirects=True)
-            return True
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.TooManyRedirects,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError
-        ):
+            response = SESSION.head(self.url, timeout=5, allow_redirects=True)
+            return response.status_code < 500
+        except requests.exceptions.RequestException:
             return False
 
     def validate_link(self) -> bool:
@@ -72,14 +88,13 @@ class NetworkUtilities:
         """
         try:
             response = SESSION.head(self.url, timeout=5, allow_redirects=True)
-            response.raise_for_status()
+            if response.status_code == 405:
+                with SESSION.get(self.url, timeout=5, allow_redirects=True, stream=True) as get_resp:
+                    get_resp.raise_for_status()
+            else:
+                response.raise_for_status()
             return True
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.TooManyRedirects,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError
-        ):
+        except requests.exceptions.RequestException:
             return False
 
 
@@ -96,21 +111,12 @@ class NetworkUtilities:
             requests.Response: Response object from requests.get
         """
 
-        result: requests.Response = None
-
+        kwargs.setdefault("timeout", (10, 30))
         try:
-            result = SESSION.get(url, **kwargs)
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.TooManyRedirects,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError
-        ) as error:
-            logging.warn(f"Error calling requests.get: {error}")
-            # Return empty response object
+            return SESSION.get(url, **kwargs)
+        except requests.exceptions.RequestException as error:
+            logging.warning(f"Error calling requests.get: {error}")
             return requests.Response()
-
-        return result
 
     def post(self, url: str, **kwargs) -> requests.Response:
         """
@@ -125,21 +131,12 @@ class NetworkUtilities:
             requests.Response: Response object from requests.post
         """
 
-        result: requests.Response = None
-
+        kwargs.setdefault("timeout", (10, 30))
         try:
-            result = SESSION.post(url, **kwargs)
-        except (
-            requests.exceptions.Timeout,
-            requests.exceptions.TooManyRedirects,
-            requests.exceptions.ConnectionError,
-            requests.exceptions.HTTPError
-        ) as error:
-            logging.warn(f"Error calling requests.post: {error}")
-            # Return empty response object
+            return SESSION.post(url, **kwargs)
+        except requests.exceptions.RequestException as error:
+            logging.warning(f"Error calling requests.post: {error}")
             return requests.Response()
-
-        return result
 
 
 class DownloadObject:
@@ -160,9 +157,14 @@ class DownloadObject:
 
     """
 
+    CHUNK_SIZE:     int   = 64 * 1024
+    MAX_RETRIES:    int   = 4
+    RETRY_BACKOFF:  float = 1.0
+    STREAM_TIMEOUT: tuple = (10, 30)
+
     def __init__(self, url: str, path: str, checksum_algo: Optional["hashlib._Hash"] = None) -> None:
         self.url:       str = url
-        self.status:    str = DownloadStatus.INACTIVE
+        self.status:    DownloadStatus = DownloadStatus.INACTIVE
         self.error_msg: str = ""
         self.filename:  str = self._get_filename()
 
@@ -175,19 +177,20 @@ class DownloadObject:
         self.error:             bool = False
         self.should_stop:       bool = False
         self.download_complete: bool = False
-        self.has_network:       bool = NetworkUtilities(self.url).verify_network_connection()
+        self.has_network:       bool = False
 
         self.active_thread: threading.Thread = None
 
         self.checksum = None
-        self._checksum_storage: Optional[hashlib._Hash] = checksum_algo
+        self._checksum_algo_name: Optional[str] = getattr(checksum_algo, "name", None) if checksum_algo is not None else None
+        self._checksum_storage: Optional["hashlib._Hash"] = checksum_algo
 
-        if self.has_network:
-            self._populate_file_size()
+        self._probe_remote()
 
 
     def __del__(self) -> None:
-        self.stop()
+        if self.status == DownloadStatus.DOWNLOADING:
+            self.stop()
 
 
     def download(self, display_progress: bool = False, spawn_thread: bool = True) -> None:
@@ -200,13 +203,12 @@ class DownloadObject:
         Parameters:
             display_progress (bool): Display progress in console
             spawn_thread (bool): Spawn a thread to download the file, otherwise download in the current thread
-            verify_checksum (Optional[hashlib._Hash]): Checksum algorithm to use for verifying the download, optional
 
         """
         self.status = DownloadStatus.DOWNLOADING
         logging.info(f"Starting download: {self.filename}")
         if spawn_thread:
-            if self.active_thread:
+            if self.active_thread and self.active_thread.is_alive():
                 logging.error("Download already in progress")
                 return
             self.active_thread = threading.Thread(target=self._download, args=(display_progress,))
@@ -229,6 +231,7 @@ class DownloadObject:
         """
 
         if verify_checksum:
+            self._checksum_algo_name = "sha256"
             self._checksum_storage = hashlib.sha256()
 
         self.download(spawn_thread=False)
@@ -236,7 +239,7 @@ class DownloadObject:
         if not self.download_complete:
             return False
 
-        return self._checksum_storage.hexdigest() if self._checksum_storage else True
+        return self.checksum if self._checksum_storage else True
 
 
     def _get_filename(self) -> str:
@@ -250,23 +253,29 @@ class DownloadObject:
         return Path(self.url).name
 
 
-    def _populate_file_size(self) -> None:
+    def _probe_remote(self) -> None:
         """
-        Get the file size of the file to be downloaded
-
-        If unable to get file size, set to zero
+        Verify remote reachability and populate expected Content-Length in a single HEAD request
         """
 
         try:
             result = SESSION.head(self.url, allow_redirects=True, timeout=5)
-            if 'Content-Length' in result.headers:
-                self.total_file_size = float(result.headers['Content-Length'])
-            else:
-                raise Exception("Content-Length missing from headers")
-        except Exception as e:
-            logging.error(f"Error determining file size {self.url}: {str(e)}")
-            logging.error("Assuming file size is 0")
+            self.has_network = result.status_code < 500
+            if "Content-Length" in result.headers and result.status_code < 400:
+                self.total_file_size = float(result.headers["Content-Length"])
+        except requests.exceptions.RequestException as e:
+            logging.debug(f"HEAD probe failed for {self.url}: {e}")
+            self.has_network = False
             self.total_file_size = 0.0
+
+
+    def _reset_transfer(self) -> None:
+        self.downloaded_file_size = 0.0
+        self.start_time = time.time()
+        if self._checksum_algo_name:
+            self._checksum_storage = hashlib.new(self._checksum_algo_name)
+        elif self._checksum_storage is not None:
+            self._checksum_storage = None
 
 
     def _update_checksum(self, chunk: bytes) -> None:
@@ -278,6 +287,48 @@ class DownloadObject:
         """
         if self._checksum_storage:
             self._checksum_storage.update(chunk)
+
+
+    def _check_free_space(self, required_bytes: float) -> None:
+        if required_bytes <= 0:
+            return
+        available_space = utilities.get_free_space(Path(self.filepath).parent)
+        if required_bytes > available_space:
+            msg = f"Not enough free space to download {self.filename}, need {utilities.human_fmt(required_bytes)}, have {utilities.human_fmt(available_space)}"
+            logging.error(msg)
+            raise Exception(msg)
+
+
+    @staticmethod
+    def _parse_content_range(header: Optional[str]) -> Optional[tuple[int, Optional[int]]]:
+        """
+        Parse RFC 9110 Content-Range header into (start_byte, total_bytes_or_None)
+        """
+        if not header or not header.lower().startswith("bytes "):
+            return None
+        spec = header[6:].strip()
+        range_part, sep, total_part = spec.partition("/")
+        if not sep or "-" not in range_part:
+            return None
+        start_str, _, end_str = range_part.partition("-")
+        if not (start_str.isdigit() and end_str.isdigit()):
+            return None
+        total = int(total_part) if total_part.isdigit() else None
+        return int(start_str), total
+
+
+    @staticmethod
+    def _is_retryable_exception(exc: Exception) -> bool:
+        if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+            return exc.response.status_code in (408, 429) or exc.response.status_code >= 500
+        return isinstance(exc, requests.exceptions.RequestException)
+
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = min(self.RETRY_BACKOFF * (2 ** attempt), 16.0)
+        deadline = time.monotonic() + delay
+        while not self.should_stop and time.monotonic() < deadline:
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
 
     def _prepare_working_directory(self, path: Path) -> bool:
@@ -295,17 +346,12 @@ class DownloadObject:
             if Path(path).exists():
                 logging.info(f"Deleting existing file: {path}")
                 Path(path).unlink()
-                return True
 
             if not Path(path).parent.exists():
                 logging.info(f"Creating directory: {Path(path).parent}")
                 Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-            available_space = utilities.get_free_space(Path(path).parent)
-            if self.total_file_size > available_space:
-                msg = f"Not enough free space to download {self.filename}, need {utilities.human_fmt(self.total_file_size)}, have {utilities.human_fmt(available_space)}"
-                logging.error(msg)
-                raise Exception(msg)
+            self._check_free_space(self.total_file_size)
 
         except Exception as e:
             self.error = True
@@ -318,9 +364,17 @@ class DownloadObject:
         return True
 
 
+    def _cleanup_partial_file(self) -> None:
+        try:
+            if self.filepath.exists():
+                self.filepath.unlink()
+        except OSError as e:
+            logging.warning(f"Failed to remove partial download {self.filepath}: {e}")
+
+
     def _download(self, display_progress: bool = False) -> None:
         """
-        Download the file
+        Download the file with retry and HTTP Range resume support
 
         Libraries should invoke download() instead of this method
 
@@ -329,50 +383,146 @@ class DownloadObject:
         """
 
         utilities.disable_sleep_while_running()
+        atexit.register(self.stop)
 
         try:
-            if not self.has_network:
-                raise Exception("No network connection")
+            if self.should_stop:
+                raise RuntimeError("Download stopped")
+
+            self.error = False
+            self.error_msg = ""
+            self.download_complete = False
+            self.downloaded_file_size = 0.0
+            self.start_time = time.time()
 
             if self._prepare_working_directory(self.filepath) is False:
                 raise Exception(self.error_msg)
 
-            response = NetworkUtilities().get(self.url, stream=True, timeout=10)
+            range_validator: Optional[str] = None
 
-            with open(self.filepath, 'wb') as file:
-                atexit.register(self.stop)
-                for i, chunk in enumerate(response.iter_content(1024 * 1024 * 4)):
-                    if self.should_stop:
-                        raise Exception("Download stopped")
-                    if chunk:
-                        file.write(chunk)
-                        self.downloaded_file_size += len(chunk)
-                        if self._checksum_storage:
-                            self._update_checksum(chunk)
-                        if display_progress and i % 100:
-                            # Don't use logging here, as we'll be spamming the log file
-                            if self.total_file_size == 0.0:
-                                print(f"Downloaded {utilities.human_fmt(self.downloaded_file_size)} of {self.filename}")
+            for attempt in range(self.MAX_RETRIES + 1):
+                if self.should_stop:
+                    raise RuntimeError("Download stopped")
+
+                headers = {}
+                offset = int(self.downloaded_file_size)
+                if offset > 0:
+                    headers["Range"] = f"bytes={offset}-"
+                    if range_validator:
+                        headers["If-Range"] = range_validator
+
+                try:
+                    with SESSION.get(self.url, stream=True, timeout=self.STREAM_TIMEOUT, headers=headers) as response:
+                        if response.status_code == 416:
+                            if self.total_file_size > 0 and offset == int(self.total_file_size):
+                                break
+                            self._reset_transfer()
+                            range_validator = None
+                            if attempt < self.MAX_RETRIES:
+                                self._sleep_before_retry(attempt)
+                                continue
+                            response.raise_for_status()
+
+                        response.raise_for_status()
+                        self.has_network = True
+
+                        validator = response.headers.get("ETag") or response.headers.get("Last-Modified")
+                        if response.status_code != 206 or validator:
+                            range_validator = validator
+
+                        compressed = bool(response.headers.get("Content-Encoding"))
+                        file_mode = "wb"
+
+                        if response.status_code == 206 and offset > 0:
+                            parsed = self._parse_content_range(response.headers.get("Content-Range"))
+                            if parsed is not None and parsed[0] == offset:
+                                file_mode = "ab"
+                                if parsed[1] is not None:
+                                    self.total_file_size = float(parsed[1])
                             else:
-                                print(f"Downloaded {self.get_percent():.2f}% of {self.filename} ({utilities.human_fmt(self.get_speed())}/s) ({self.get_time_remaining():.2f} seconds remaining)")
-                self.download_complete = True
-                logging.info(f"Download complete: {self.filename}")
-                logging.info("Stats:")
-                logging.info(f"- Downloaded size: {utilities.human_fmt(self.downloaded_file_size)}")
-                logging.info(f"- Time elapsed: {(time.time() - self.start_time):.2f} seconds")
-                logging.info(f"- Speed: {utilities.human_fmt(self.downloaded_file_size / (time.time() - self.start_time))}/s")
-                logging.info(f"- Location: {self.filepath}")
-                if self._checksum_storage:
-                    self.checksum = self._checksum_storage.hexdigest()
-                    logging.info(f"Checksum: {self.checksum}")
+                                self._reset_transfer()
+                                range_validator = None
+                                if attempt < self.MAX_RETRIES:
+                                    self._sleep_before_retry(attempt)
+                                    continue
+                                raise requests.exceptions.ConnectionError(
+                                    f"Server returned invalid Content-Range: {response.headers.get('Content-Range')}"
+                                )
+                        else:
+                            if offset > 0:
+                                logging.info(f"Server did not resume {self.filename} (HTTP {response.status_code}), restarting from 0")
+                                self._reset_transfer()
+                            if not compressed and "Content-Length" in response.headers:
+                                cl = float(response.headers["Content-Length"])
+                                if cl > 0:
+                                    self.total_file_size = cl
+                            self._check_free_space(self.total_file_size)
+
+                        with open(self.filepath, file_mode) as file:
+                            for i, chunk in enumerate(response.iter_content(self.CHUNK_SIZE)):
+                                if self.should_stop:
+                                    raise RuntimeError("Download stopped")
+                                if not chunk:
+                                    continue
+                                file.write(chunk)
+                                self.downloaded_file_size += len(chunk)
+                                if self._checksum_storage:
+                                    self._update_checksum(chunk)
+                                if display_progress and i % 1600 == 0:
+                                    if self.total_file_size == 0.0:
+                                        print(f"Downloaded {utilities.human_fmt(self.downloaded_file_size)} of {self.filename}")
+                                    else:
+                                        print(f"Downloaded {self.get_percent():.2f}% of {self.filename} ({utilities.human_fmt(self.get_speed())}/s) ({self.get_time_remaining():.2f} seconds remaining)")
+                            file.flush()
+
+                        if not compressed and self.total_file_size > 0:
+                            if self.downloaded_file_size < self.total_file_size:
+                                raise requests.exceptions.ConnectionError(
+                                    f"Incomplete transfer: received {int(self.downloaded_file_size)} of {int(self.total_file_size)} bytes"
+                                )
+                            if self.downloaded_file_size > self.total_file_size:
+                                self._reset_transfer()
+                                range_validator = None
+                                raise requests.exceptions.ConnectionError(
+                                    f"Corrupt transfer size: exceeded expected {int(self.total_file_size)} bytes"
+                                )
+
+                        break
+
+                except Exception as e:
+                    if self.should_stop or not self._is_retryable_exception(e) or attempt >= self.MAX_RETRIES:
+                        raise
+                    if not self.has_network and self.downloaded_file_size == 0 and isinstance(e, requests.exceptions.ConnectionError):
+                        raise
+                    logging.warning(
+                        f"Download interrupted for {self.filename} at {int(self.downloaded_file_size)} bytes "
+                        f"(attempt {attempt + 1}/{self.MAX_RETRIES}): {e}"
+                    )
+                    self._sleep_before_retry(attempt)
+
+            elapsed = max(time.time() - self.start_time, 1e-6)
+            self.download_complete = True
+            self.status = DownloadStatus.COMPLETE
+            logging.info(f"Download complete: {self.filename}")
+            logging.info("Stats:")
+            logging.info(f"- Downloaded size: {utilities.human_fmt(self.downloaded_file_size)}")
+            logging.info(f"- Time elapsed: {elapsed:.2f} seconds")
+            logging.info(f"- Speed: {utilities.human_fmt(self.downloaded_file_size / elapsed)}/s")
+            logging.info(f"- Location: {self.filepath}")
+            if self._checksum_storage:
+                self.checksum = self._checksum_storage.hexdigest()
+                logging.info(f"Checksum: {self.checksum}")
+
         except Exception as e:
             self.error = True
             self.error_msg = str(e)
+            self.download_complete = False
             self.status = DownloadStatus.ERROR
+            self._cleanup_partial_file()
             logging.error(f"Error downloading {self.url}: {self.error_msg}")
-
-        self.status = DownloadStatus.COMPLETE
-        utilities.enable_sleep_after_running()
+        finally:
+            atexit.unregister(self.stop)
+            utilities.enable_sleep_after_running()
 
 
     def get_percent(self) -> float:
@@ -396,7 +546,7 @@ class DownloadObject:
             float: The download speed in bytes per second
         """
 
-        return self.downloaded_file_size / (time.time() - self.start_time)
+        return self.downloaded_file_size / max(time.time() - self.start_time, 1e-6)
 
 
     def get_time_remaining(self) -> float:
@@ -434,9 +584,7 @@ class DownloadObject:
             boolean: True if active, False if completed, failed, stopped, or inactive
         """
 
-        if self.status == DownloadStatus.DOWNLOADING:
-            return True
-        return False
+        return self.status == DownloadStatus.DOWNLOADING
 
 
     def stop(self) -> None:
@@ -447,6 +595,6 @@ class DownloadObject:
         """
 
         self.should_stop = True
-        if self.active_thread:
+        if self.active_thread and self.active_thread is not threading.current_thread():
             while self.active_thread.is_alive():
-                time.sleep(1)
+                time.sleep(0.1)
