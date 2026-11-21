@@ -1,5 +1,5 @@
 """
-gui_help.py: GUI Help Menu
+gui_help.py: Help & Support Resources view
 """
 
 import wx
@@ -7,66 +7,45 @@ import logging
 import webbrowser
 
 from .. import constants
+from ..wx_gui import gui_support, gui_strings
 
-from ..wx_gui import gui_support
 
-
-class HelpFrame(wx.Frame):
+class HelpPanel(wx.Panel):
     """
-    Append to main menu through a modal dialog
+    In-window Help & Support resources view
     """
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None) -> None:
-        logging.info("Initializing Help Frame")
-        self.dialog = wx.Dialog(parent, title=title, size=(300, 200))
 
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        logging.info("Initializing Help Panel")
+        self.constants = global_constants
+        self.app = app
 
-        self._generate_elements(self.dialog)
-        self.dialog.ShowWindowModal()
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(
+            gui_support.PageHeader(
+                self,
+                gui_strings.HELP["title"],
+                subtitle=gui_strings.HELP["subtitle"],
+                back_label=gui_strings.NAV["return_main"],
+                on_back=self.app.go_home,
+            ),
+            0,
+            wx.EXPAND,
+        )
 
+        sizer.AddStretchSpacer(1)
 
-    def _generate_elements(self, frame: wx.Frame = None) -> None:
-        """
-        Format:
-            - Title: Patcher Resources
-            - Text:  Following resources are available:
-            - Button: Official Guide
-            - Button: Community Discord Server
-            - Button: Official Phone Support
-            - Button: Return to Main Menu
-        """
+        buttons = [
+            (gui_strings.HELP["official_guide"], self.constants.guide_link),
+            (gui_strings.HELP["discord"], self.constants.discord_link),
+            (gui_strings.HELP["phone_support"], "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
+        ]
+        for label, url in buttons:
+            btn = wx.Button(self, label=label, size=(240, 34))
+            btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+            btn.Bind(wx.EVT_BUTTON, lambda event, target=url: webbrowser.open(target))
+            sizer.Add(btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 12)
 
-        frame = self if not frame else frame
-
-        title_label = wx.StaticText(frame, label="Patcher Resources", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        text_label = wx.StaticText(frame, label="Following resources are available:", pos=(-1,30))
-        text_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        text_label.Centre(wx.HORIZONTAL)
-
-        buttons = {
-            "Official Guide":           self.constants.guide_link,
-            "Official Phone Support":   "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-            "Community Discord Server": self.constants.discord_link,
-        }
-
-        for button in buttons:
-            help_button = wx.Button(frame, label=button, pos=(-1, text_label.GetPosition()[1] + text_label.GetSize()[1] + (list(buttons.keys()).index(button) * 30)), size=(200, 30))
-            help_button.Bind(wx.EVT_BUTTON, lambda event, temp=buttons[button]: webbrowser.open(temp))
-            help_button.Centre(wx.HORIZONTAL)
-
-        # Button: Return to Main Menu
-        return_button = wx.Button(frame, label="Return to Main Menu", pos=(-1, help_button.GetPosition()[1] + help_button.GetSize()[1]), size=(150, 30))
-        return_button.Bind(wx.EVT_BUTTON, lambda event: frame.Close())
-        return_button.Centre(wx.HORIZONTAL)
-
-        # Set size of frame
-        frame.SetSize((-1, return_button.GetPosition()[1] + return_button.GetSize()[1] + 40))
-
-
-
-
-
+        sizer.AddStretchSpacer(2)
+        self.SetSizer(sizer)

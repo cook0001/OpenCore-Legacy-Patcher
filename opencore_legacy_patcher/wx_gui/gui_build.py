@@ -1,187 +1,89 @@
 """
-gui_build.py: Generate UI for Building OpenCore
+gui_build.py: In-window UI for Building OpenCore
 """
 
 import wx
+import time
 import logging
 import threading
 import traceback
-import time
 
 from .. import constants
-
 from ..efi_builder import build
-
-from ..wx_gui import (
-    gui_main_menu,
-    gui_install_oc,
-    gui_support
-)
+from ..wx_gui import gui_support, gui_strings
 
 
-class BuildFrame(wx.Frame):
+class BuildPanel(wx.Panel):
     """
-    Create a frame for building OpenCore
-    Uses a Modal Dialog for smoother transition from other frames
+    Renders OpenCore build logs and post-build actions inside the main window
     """
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None) -> None:
-        logging.info("Initializing Build Frame")
-        super(BuildFrame, self).__init__(parent, title=title, size=(350, 200), style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX))
-        gui_support.GenerateMenubar(self, global_constants).generate()
 
-        self.build_successful: bool = False
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        logging.info("Initializing Build Panel")
+        self.app = app
+        self.constants = global_constants
+        self.build_successful = False
 
-        self.install_button: wx.Button = None
-        self.text_box:     wx.TextCtrl = None
-        self.frame_modal:    wx.Dialog = None
+        model = self.constants.custom_model or self.constants.computer.real_model
+        self.log_panel = gui_support.LogOutputPanel(
+            self,
+            title=gui_strings.BUILD["title"],
+            subtitle=f"Model: {model}",
+            primary_label=gui_strings.BUILD["install_button"],
+            on_primary=lambda: self.app.navigate("install_oc"),
+            on_back=self.app.go_home,
+        )
 
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
-        self.stock_output = logging.getLogger().handlers[0].stream
-
-        self.frame_modal = wx.Dialog(self, title=title, size=(400, 200))
-
-        self._generate_elements(self.frame_modal)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.log_panel, 1, wx.EXPAND)
+        self.SetSizer(sizer)
 
         if self.constants.update_stage != gui_support.AutoUpdateStages.INACTIVE:
             self.constants.update_stage = gui_support.AutoUpdateStages.BUILDING
 
-        self.Centre()
-        self.frame_modal.ShowWindowModal()
+    def start(self) -> None:
+        self.app.set_busy(True, "building OpenCore")
+        try:
+            while gui_support.PayloadMount(self.constants, self.app).is_unpack_finished() is False:
+                wx.Yield()
+                time.sleep(self.constants.thread_sleep_interval)
 
-        self._invoke_build()
+            thread = threading.Thread(target=self._build)
+            thread.start()
+            gui_support.wait_for_thread(thread)
+        finally:
+            self.app.set_busy(False)
 
+        self.log_panel.finish(enable_primary=self.build_successful)
 
-    def _generate_elements(self, frame: wx.Frame = None) -> None:
-        """
-        Generate UI elements for build frame
-
-        Format:
-            - Title label:        Build and Install OpenCore
-            - Text:               Model: {Build or Host Model}
-            - Button:             Install OpenCore
-            - Read-only text box: {empty}
-            - Button:             Return to Main Menu
-        """
-        frame = self if not frame else frame
-
-        title_label = wx.StaticText(frame, label="Build and Install OpenCore", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        model_label = wx.StaticText(frame, label=f"Model: {self.constants.custom_model or self.constants.computer.real_model}", pos=(-1,30))
-        model_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        model_label.Centre(wx.HORIZONTAL)
-
-        # Button: Install OpenCore
-        install_button = wx.Button(frame, label="🔩 Install OpenCore", pos=(-1, model_label.GetPosition()[1] + model_label.GetSize()[1]), size=(150, 30))
-        install_button.Bind(wx.EVT_BUTTON, self.on_install)
-        install_button.Centre(wx.HORIZONTAL)
-        install_button.Disable()
-        self.install_button = install_button
-
-        # Read-only text box: {empty}
-        text_box = wx.TextCtrl(frame, value="", pos=(-1, install_button.GetPosition()[1] + install_button.GetSize()[1] + 10), size=(380, 350), style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_RICH2)
-        text_box.Centre(wx.HORIZONTAL)
-        self.text_box = text_box
-
-        # Button: Return to Main Menu
-        return_button = wx.Button(frame, label="Return to Main Menu", pos=(-1, text_box.GetPosition()[1] + text_box.GetSize()[1] + 5), size=(150, 30))
-        return_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
-        return_button.Centre(wx.HORIZONTAL)
-        return_button.Disable()
-        self.return_button = return_button
-
-        # Adjust window size to fit all elements
-        frame.SetSize((-1, return_button.GetPosition()[1] + return_button.GetSize()[1] + 40))
-
-
-    def _invoke_build(self) -> None:
-        """
-        Invokes build function and waits for it to finish
-        """
-        while gui_support.PayloadMount(self.constants, self).is_unpack_finished() is False:
-            wx.Yield()
-            time.sleep(self.constants.thread_sleep_interval)
-
-        thread = threading.Thread(target=self._build)
-        thread.start()
-
-        gui_support.wait_for_thread(thread)
-
-        self.return_button.Enable()
-
-        # Check if config.plist was built
         if self.build_successful is False:
-            dialog = wx.MessageDialog(
-                parent=self,
-                message="An error occurred while building OpenCore",
-                caption="Error building OpenCore",
-                style=wx.OK | wx.ICON_ERROR
-            )
-            dialog.ShowModal()
+            wx.MessageDialog(
+                self.app,
+                gui_strings.BUILD["error_msg"],
+                gui_strings.BUILD["error_title"],
+                wx.OK | wx.ICON_ERROR,
+            ).ShowModal()
             return
 
-        dialog = wx.MessageDialog(
-            parent=self,
-            message=f"Would you like to install OpenCore now?",
-            caption="Finished building your OpenCore configuration!",
-            style=wx.YES_NO | wx.ICON_QUESTION
+        dlg = wx.MessageDialog(
+            self.app,
+            gui_strings.BUILD["done_msg"],
+            gui_strings.BUILD["done_title"],
+            wx.YES_NO | wx.ICON_QUESTION,
         )
-        dialog.SetYesNoLabels("Install to disk", "View build log")
-
-        self.on_install() if dialog.ShowModal() == wx.ID_YES else self.install_button.Enable()
-
+        dlg.SetYesNoLabels(gui_strings.BUILD["install_now"], gui_strings.BUILD["view_log"])
+        if dlg.ShowModal() == wx.ID_YES:
+            self.app.navigate("install_oc")
 
     def _build(self) -> None:
-        """
-        Calls build function and redirects stdout to the text box
-        """
-        logger = logging.getLogger()
-        logger.addHandler(gui_support.ThreadHandler(self.text_box))
-        try:
-            build.BuildOpenCore(self.constants.custom_model or self.constants.computer.real_model, self.constants)
-            self.build_successful = True
-        except Exception as e:
-            logging.error("An internal error occurred while building:\n")
-            logging.error(traceback.format_exc())
-
-            # Handle bug from 2.1.0 where None type was stored in config.plist from global settings
-            if "TypeError: unsupported type: <class 'NoneType'>" in traceback.format_exc():
-                logging.error("If you continue to see this error, delete the following file and restart the application:")
-                logging.error("Path: /Users/Shared/.com.dortania.opencore-legacy-patcher.plist")
-
-        logger.removeHandler(logger.handlers[2])
-
-
-    def on_return_to_main_menu(self, event: wx.Event = None) -> None:
-        """
-        Return to main menu
-        """
-        self.frame_modal.Hide()
-        main_menu_frame = gui_main_menu.MainFrame(
-            None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetScreenPosition()
-        )
-        main_menu_frame.Show()
-        self.frame_modal.Destroy()
-        self.Destroy()
-
-
-    def on_install(self, event: wx.Event = None) -> None:
-        """
-        Launch install frame
-        """
-        self.frame_modal.Destroy()
-        self.Destroy()
-        install_oc_frame = gui_install_oc.InstallOCFrame(
-            None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetScreenPosition()
-        )
-        install_oc_frame.Show()
-
-
+        with gui_support.capture_logs(self.log_panel.text_box):
+            try:
+                build.BuildOpenCore(self.constants.custom_model or self.constants.computer.real_model, self.constants)
+                self.build_successful = True
+            except Exception:
+                logging.error("An internal error occurred while building:\n")
+                logging.error(traceback.format_exc())
+                if "TypeError: unsupported type: <class 'NoneType'>" in traceback.format_exc():
+                    logging.error("If you continue to see this error, reset settings or delete:")
+                    logging.error("Path: /Users/Shared/.com.dortania.opencore-legacy-patcher.plist")

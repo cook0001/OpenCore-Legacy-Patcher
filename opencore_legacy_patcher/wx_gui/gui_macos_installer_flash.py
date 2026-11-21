@@ -1,5 +1,5 @@
 """
-gui_macos_installer_flash.py: macOS Installer Flash Frame
+gui_macos_installer_flash.py: In-window macOS Installer Flash Panel
 """
 
 import wx
@@ -12,221 +12,204 @@ import subprocess
 from pathlib import Path
 
 from .. import constants
-
 from ..datasets import os_data
-from ..volume   import generate_copy_arguments
-
-from ..wx_gui import (
-    gui_main_menu,
-    gui_build,
-    gui_support
-)
+from ..volume import generate_copy_arguments
+from ..wx_gui import gui_support, gui_strings
 from ..support import (
     macos_installer_handler,
     utilities,
     network_handler,
     kdk_handler,
     metallib_handler,
-    subprocess_wrapper
+    subprocess_wrapper,
 )
 
 
-class macOSInstallerFlashFrame(wx.Frame):
+class macOSInstallerFlashPanel(wx.Panel):
+    """
+    In-window multi-step installer selector, USB disk picker, and sequential flash/asset pipeline
+    """
 
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None):
-        logging.info("Initializing macOS Installer Flash Frame")
-        super(macOSInstallerFlashFrame, self).__init__(parent, title=title, size=(350, 200), style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX))
-        gui_support.GenerateMenubar(self, global_constants).generate()
-
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        logging.info("Initializing macOS Installer Flash Panel")
+        self.app = app
+        self.constants = global_constants
 
         self.available_installers_local: dict = {}
         self.available_disks: dict = {}
         self.prepare_result: bool = False
+        self.result: bool = False
+        self.flash_error = None
+        self.active_step: wx.Panel = None
 
-        self.progress_bar_animation: gui_support.GaugePulseCallback = None
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.sizer)
 
-        self.frame_modal: wx.Dialog = None
+    def _set_step(self, panel: wx.Panel) -> None:
+        if self.active_step is not None:
+            self.sizer.Detach(self.active_step)
+            self.active_step.Destroy()
+        self.active_step = panel
+        self.sizer.Add(panel, 1, wx.EXPAND)
+        self.Layout()
 
-        self._generate_elements()
+    def start(self) -> None:
+        self._scan_installers()
 
-        self.Centre()
-        self.Show()
+    def _scan_installers(self) -> None:
+        self._set_step(
+            gui_support.IndeterminateProgressPanel(
+                self,
+                self.constants,
+                gui_strings.INSTALLER["fetching_local"],
+                message=gui_strings.INSTALLER["fetching_local"],
+                back_label=gui_strings.NAV["back"],
+                on_back=lambda: self.app.navigate("installer_choice"),
+            )
+        )
 
-        self._populate_installers()
+        def _fetch():
+            self.available_installers_local = macos_installer_handler.LocalInstallerCatalog().available_apps or {}
 
-
-    def _generate_elements(self) -> None:
-        """
-        Fetches local macOS Installers for users to select from
-        """
-
-        # Title: Fetching local macOS Installers
-        title_label = wx.StaticText(self, label="Fetching local macOS Installers", pos=(-1,1))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        # Progress bar
-        progress_bar = wx.Gauge(self, range=100, pos=(-1, 30), size=(200, 30))
-        progress_bar.Centre(wx.HORIZONTAL)
-
-        progress_bar_animation = gui_support.GaugePulseCallback(self.constants, progress_bar)
-        progress_bar_animation.start_pulse()
-        self.progress_bar_animation = progress_bar_animation
-
-        # Set size of frame
-        self.SetSize((-1, progress_bar.GetPosition()[1] + progress_bar.GetSize()[1] + 40))
-
-
-    def _populate_installers(self) -> None:
-        # Grab installer catalog
-        def fetch_installers():
-            self.available_installers_local = macos_installer_handler.LocalInstallerCatalog().available_apps
-
-        thread = threading.Thread(target=fetch_installers)
+        thread = threading.Thread(target=_fetch)
         thread.start()
-
         gui_support.wait_for_thread(thread)
+        self._show_installer_list()
 
-        frame_modal = wx.Dialog(self, title=self.title, size=(350, 200))
+    def _show_installer_list(self) -> None:
+        step = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(
+            gui_support.PageHeader(
+                step,
+                gui_strings.INSTALLER["select_local"],
+                back_label=gui_strings.NAV["back"],
+                on_back=lambda: self.app.navigate("installer_choice"),
+            ),
+            0,
+            wx.EXPAND,
+        )
 
-        # Title: Select macOS Installer
-        title_label = wx.StaticText(frame_modal, label="Select local macOS Installer", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
+        scroll = wx.ScrolledWindow(step, style=wx.VSCROLL)
+        scroll.SetScrollRate(0, 16)
+        list_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # List of installers
         if self.available_installers_local:
             logging.info("Installer(s) found:")
-            spacer = 10
             entries = len(self.available_installers_local)
-            for app in self.available_installers_local:
-                logging.info(f"- {self.available_installers_local[app]['Short Name']}: {self.available_installers_local[app]['Version']} ({self.available_installers_local[app]['Build']})")
-
-                app_str = f"{self.available_installers_local[app]['Short Name']}"
-                unsupported: bool = self.available_installers_local[app]['Minimum Host OS'] > self.constants.detected_os
-
+            for app_key, info in self.available_installers_local.items():
+                logging.info(f"- {info['Short Name']}: {info['Version']} ({info['Build']})")
+                unsupported = info["Minimum Host OS"] > self.constants.detected_os
                 if unsupported:
-                    min_str = os_data.os_conversion.convert_kernel_to_marketing_name(self.available_installers_local[app]['Minimum Host OS'])
-                    app_str += f" (Requires {min_str})"
+                    min_str = os_data.os_conversion.convert_kernel_to_marketing_name(info["Minimum Host OS"])
+                    app_str = f"{info['Short Name']} (Requires {min_str})"
                 else:
-                    app_str += f": {self.available_installers_local[app]['Version']} ({self.available_installers_local[app]['Build']})"
+                    app_str = f"{info['Short Name']}: {info['Version']} ({info['Build']})"
 
-                installer_button = wx.Button(frame_modal, label=app_str, pos=(-1, title_label.GetPosition()[1] + title_label.GetSize()[1] + spacer), size=(300, 30))
-                installer_button.Bind(wx.EVT_BUTTON, lambda event, temp=app: self.on_select(self.available_installers_local[temp]))
-                installer_button.Centre(wx.HORIZONTAL)
-                spacer += 25
+                btn = wx.Button(scroll, label=app_str, size=(420, 32))
+                btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                btn.Bind(wx.EVT_BUTTON, lambda event, inst=info: self.on_select(inst))
                 if unsupported:
-                    installer_button.Disable()
+                    btn.Disable()
                 elif entries == 1:
-                    installer_button.SetDefault()
-
+                    btn.SetDefault()
+                list_sizer.Add(btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
         else:
-            installer_button = wx.StaticText(frame_modal, label="No installers found in '/Applications'", pos=(-1, title_label.GetPosition()[1] + title_label.GetSize()[1] + 5))
-            installer_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-            installer_button.Centre(wx.HORIZONTAL)
+            empty = wx.StaticText(scroll, label=gui_strings.INSTALLER["no_local"])
+            empty.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+            list_sizer.Add(empty, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 20)
 
-        # Button: Return to Main Menu
-        cancel_button = wx.Button(frame_modal, label="Return to Main Menu", pos=(-1, installer_button.GetPosition()[1] + installer_button.GetSize()[1]), size=(150, 30))
-        cancel_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
-        cancel_button.Centre(wx.HORIZONTAL)
+        scroll.SetSizer(list_sizer)
+        scroll.FitInside()
+        outer.Add(scroll, 1, wx.EXPAND | wx.ALL, 16)
 
-        # Set size of frame
-        frame_modal.SetSize((-1, cancel_button.GetPosition()[1] + cancel_button.GetSize()[1] + 40))
+        ret_btn = wx.Button(step, label=gui_strings.NAV["return_main"], size=(170, 30))
+        ret_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        ret_btn.Bind(wx.EVT_BUTTON, lambda event: self.app.go_home())
+        outer.Add(ret_btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 16)
 
-        self.progress_bar_animation.stop_pulse()
-
-        frame_modal.ShowWindowModal()
-        self.frame_modal = frame_modal
-
+        step.SetSizer(outer)
+        self._set_step(step)
 
     def on_select(self, installer: dict) -> None:
         logging.info(f"Selected installer: {installer['Short Name']} ({installer['Version']} ({installer['Build']}))")
-        self.frame_modal.Destroy()
+        self._set_step(
+            gui_support.IndeterminateProgressPanel(
+                self,
+                self.constants,
+                gui_strings.INSTALLER["fetching_usb"],
+                message=gui_strings.INSTALLER["fetching_usb"],
+                back_label=gui_strings.NAV["back"],
+                on_back=self._show_installer_list,
+            )
+        )
 
-        for child in self.GetChildren():
-            child.Destroy()
-
-        # Fetching information on local disks
-        title_label = wx.StaticText(self, label="Fetching information on local disks", pos=(-1,1))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        # Progress bar
-        progress_bar = wx.Gauge(self, range=100, pos=(-1, 30), size=(200, 30))
-        progress_bar.Centre(wx.HORIZONTAL)
-
-        progress_bar_animation = gui_support.GaugePulseCallback(self.constants, progress_bar)
-        progress_bar_animation.start_pulse()
-
-        # Set size of frame
-        self.SetSize((-1, progress_bar.GetPosition()[1] + progress_bar.GetSize()[1] + 40))
-
-        # Fetch local disks
         def _fetch_disks():
-            self.available_disks = macos_installer_handler.InstallerCreation().list_disk_to_format()
-
-            # Need to clean up output on pre-Sierra
-            # Disk images are mixed in with regular disks (ex. payloads.dmg)
-            ignore = ["disk image", "read-only", "virtual"]
-            for disk in self.available_disks.copy():
-                if any(string in self.available_disks[disk]['name'].lower() for string in ignore):
+            self.available_disks = macos_installer_handler.InstallerCreation().list_disk_to_format() or {}
+            ignore = ("disk image", "read-only", "virtual")
+            for disk in list(self.available_disks.keys()):
+                if any(token in self.available_disks[disk]["name"].lower() for token in ignore):
                     del self.available_disks[disk]
-
 
         thread = threading.Thread(target=_fetch_disks)
         thread.start()
-
         gui_support.wait_for_thread(thread)
+        self._show_disk_list(installer)
 
-        self.frame_modal = wx.Dialog(self, title=self.title, size=(350, 200))
+    def _show_disk_list(self, installer: dict) -> None:
+        step = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(
+            gui_support.PageHeader(
+                step,
+                gui_strings.INSTALLER["select_usb"],
+                subtitle=f"Installer: {installer['Short Name']} ({installer['Version']})",
+                back_label=gui_strings.NAV["back"],
+                on_back=self._show_installer_list,
+            ),
+            0,
+            wx.EXPAND,
+        )
 
-        # Title: Select local disk
-        title_label = wx.StaticText(self.frame_modal, label="Select local disk", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
+        scroll = wx.ScrolledWindow(step, style=wx.VSCROLL)
+        scroll.SetScrollRate(0, 16)
+        list_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Label: Selected USB will be erased, please backup any data
-        warning_label = wx.StaticText(self.frame_modal, label="Selected USB will be erased, please backup any data", pos=(-1, title_label.GetPosition()[1] + title_label.GetSize()[1] + 5))
-        warning_label.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
-        warning_label.Centre(wx.HORIZONTAL)
-
-        # List of disks
         if self.available_disks:
-            spacer = 5
-            entries = len(self.available_disks)
             logging.info("Available disks:")
-            for disk in self.available_disks:
-                logging.info(f" - {disk}: {self.available_disks[disk]['name']} - {utilities.human_fmt(self.available_disks[disk]['size'])}")
-                disk_button = wx.Button(self.frame_modal, label=f"{disk}: {self.available_disks[disk]['name']} - {utilities.human_fmt(self.available_disks[disk]['size'])}", pos=(-1, warning_label.GetPosition()[1] + warning_label.GetSize()[1] + spacer), size=(300, 30))
-                disk_button.Bind(wx.EVT_BUTTON, lambda event, temp=disk: self.on_select_disk(self.available_disks[temp], installer))
-                disk_button.Centre(wx.HORIZONTAL)
+            entries = len(self.available_disks)
+            for disk_key, dinfo in self.available_disks.items():
+                logging.info(f" - {disk_key}: {dinfo['name']} - {utilities.human_fmt(dinfo['size'])}")
+                btn = wx.Button(scroll, label=f"{disk_key}: {dinfo['name']} - {utilities.human_fmt(dinfo['size'])}", size=(460, 32))
+                btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                btn.Bind(wx.EVT_BUTTON, lambda event, d=dinfo: self.on_select_disk(d, installer))
                 if entries == 1:
-                    disk_button.SetDefault()
-                spacer += 25
+                    btn.SetDefault()
+                list_sizer.Add(btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
         else:
-            disk_button = wx.StaticText(self.frame_modal, label="No disks found", pos=(-1, warning_label.GetPosition()[1] + warning_label.GetSize()[1] + 5))
-            disk_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-            disk_button.Centre(wx.HORIZONTAL)
+            empty = wx.StaticText(scroll, label=gui_strings.INSTALLER["no_usb"])
+            empty.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+            list_sizer.Add(empty, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 20)
 
-        # Search for disks again
-        search_button = wx.Button(self.frame_modal, label="Search for disks again", pos=(-1, disk_button.GetPosition()[1] + disk_button.GetSize()[1]), size=(150, 30))
-        search_button.Bind(wx.EVT_BUTTON, lambda event, temp=installer: self.on_select(temp))
-        search_button.Centre(wx.HORIZONTAL)
+        scroll.SetSizer(list_sizer)
+        scroll.FitInside()
+        outer.Add(scroll, 1, wx.EXPAND | wx.ALL, 16)
 
-        # Button: Return to Main Menu
-        cancel_button = wx.Button(self.frame_modal, label="Return to Main Menu", pos=(-1, search_button.GetPosition()[1] + search_button.GetSize()[1] - 10), size=(150, 30))
-        cancel_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
-        cancel_button.Centre(wx.HORIZONTAL)
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        rescan_btn = wx.Button(step, label=gui_strings.INSTALLER["rescan_usb"], size=(150, 30))
+        rescan_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        rescan_btn.Bind(wx.EVT_BUTTON, lambda event: self.on_select(installer))
+        btn_row.Add(rescan_btn, 0, wx.RIGHT, 10)
 
-        # Set size of frame
-        self.frame_modal.SetSize((-1, cancel_button.GetPosition()[1] + cancel_button.GetSize()[1] + 40))
+        ret_btn = wx.Button(step, label=gui_strings.NAV["return_main"], size=(170, 30))
+        ret_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        ret_btn.Bind(wx.EVT_BUTTON, lambda event: self.app.go_home())
+        btn_row.Add(ret_btn, 0)
 
-        progress_bar_animation.stop_pulse()
-
-        self.frame_modal.ShowWindowModal()
-
+        outer.Add(btn_row, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 16)
+        step.SetSizer(outer)
+        self._set_step(step)
 
     @staticmethod
     def _read_disk_mb(root_disk: str, fallback: float = 0.0) -> float:
@@ -235,53 +218,50 @@ class macOSInstallerFlashFrame(wx.Frame):
         except Exception:
             return fallback
 
-
     def on_select_disk(self, disk: dict, installer: dict) -> None:
-        answer = wx.MessageBox(f"Are you sure you want to erase '{disk['name']}'?\nAll data will be lost, this cannot be undone.", "Confirmation", wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+        answer = wx.MessageBox(
+            f"Are you sure you want to erase '{disk['name']}'?\nAll data will be lost, this cannot be undone.",
+            "Confirmation",
+            wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION,
+        )
         if answer != wx.YES:
             return
 
         logging.info(f"Selected disk: {disk['name']}")
 
-        self.frame_modal.Destroy()
+        step = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        header = gui_support.PageHeader(step, f"Creating Installer: {installer['Short Name']}")
+        outer.Add(header, 0, wx.EXPAND)
+        outer.AddStretchSpacer(1)
 
-        for child in self.GetChildren():
-            child.Destroy()
+        note1 = wx.StaticText(step, label="Creating macOS installers can take 30min+ on slower USB drives.", style=wx.ALIGN_CENTER_HORIZONTAL)
+        note1.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        note1.SetForegroundColour(wx.Colour(128, 128, 128))
+        outer.Add(note1, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 18)
 
-        self.SetSize((450, -1))
+        stage_label = wx.StaticText(step, label="Step 1 of 3: Flashing macOS Installer...", size=(540, -1), style=wx.ALIGN_CENTER_HORIZONTAL | wx.ST_NO_AUTORESIZE)
+        stage_label.SetFont(gui_support.font_factory(14, wx.FONTWEIGHT_BOLD))
+        outer.Add(stage_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
 
-        # Title: Creating Installer: {installer_name}
-        title_label = wx.StaticText(self, label=f"Creating Installer: {installer['Short Name']}", pos=(-1, 1))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        warning_label = wx.StaticText(self, label="Creating macOS installers can take 30min+ on slower USB drives.", pos=(-1, title_label.GetPosition()[1] + title_label.GetSize()[1] + 5))
-        warning_label.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
-        warning_label.Centre(wx.HORIZONTAL)
-
-        warning_label = wx.StaticText(self, label="We will notify you when the installer is ready.", pos=(-1, warning_label.GetPosition()[1] + warning_label.GetSize()[1] + 5))
-        warning_label.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
-        warning_label.Centre(wx.HORIZONTAL)
-
-        stage_label = wx.StaticText(self, label="Step 1 of 3: Flashing macOS Installer...", pos=(15, warning_label.GetPosition()[1] + warning_label.GetSize()[1] + 10), size=(420, -1), style=wx.ALIGN_CENTER_HORIZONTAL | wx.ST_NO_AUTORESIZE)
-        stage_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-
-        counter_label = wx.StaticText(self, label="Installer Written: 0.00 MB", pos=(15, stage_label.GetPosition()[1] + stage_label.GetSize()[1] + 5), size=(420, -1), style=wx.ALIGN_CENTER_HORIZONTAL | wx.ST_NO_AUTORESIZE)
+        counter_label = wx.StaticText(step, label="Installer Written: 0.00 MB", size=(540, -1), style=wx.ALIGN_CENTER_HORIZONTAL | wx.ST_NO_AUTORESIZE)
         counter_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        outer.Add(counter_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 12)
 
-        progress_bar = wx.Gauge(self, range=100, pos=(-1, counter_label.GetPosition()[1] + counter_label.GetSize()[1] + 8), size=(300, 30))
-        progress_bar.Centre(wx.HORIZONTAL)
+        progress_bar = wx.Gauge(step, range=100, size=(380, 24))
+        outer.Add(progress_bar, 0, wx.ALIGN_CENTER_HORIZONTAL)
+        outer.AddStretchSpacer(2)
 
-        self.SetSize((-1, progress_bar.GetPosition()[1] + progress_bar.GetSize()[1] + 40))
-        self.Show()
+        step.SetSizer(outer)
+        self._set_step(step)
 
+        self.app.set_busy(True, "creating macOS installer")
         utilities.disable_sleep_while_running()
         try:
-            # Prepare resources
-            if self._prepare_resources(installer['Path'], disk['identifier']) is False:
+            if self._prepare_resources(installer["Path"], disk["identifier"]) is False:
                 logging.error("Failed to prepare resources, cannot continue.")
                 wx.MessageBox("Failed to prepare resources, cannot continue.", "Error", wx.OK | wx.ICON_ERROR)
-                self.on_return_to_main_menu()
+                self.app.go_home()
                 return
 
             progress_bar_animation = None
@@ -290,8 +270,7 @@ class macOSInstallerFlashFrame(wx.Frame):
             estimated_installer_size = 16000
             progress_bar.SetRange(estimated_installer_size)
 
-            # /dev/diskX -> diskX
-            root_disk = disk['identifier'][5:]
+            root_disk = disk["identifier"][5:]
             initial_bytes_written = self._read_disk_mb(root_disk)
             self.result = False
             self.flash_error = None
@@ -315,9 +294,8 @@ class macOSInstallerFlashFrame(wx.Frame):
                 logging.error("Failed to flash installer, cannot continue.")
                 if self.flash_error:
                     output, error = self.flash_error
-                    popup = wx.MessageDialog(self, f"Failed to create macOS installer\n\nOutput: {output}\n\nError: {error}", "Error", wx.OK | wx.ICON_ERROR)
-                    popup.ShowModal()
-                self.on_return_to_main_menu()
+                    wx.MessageDialog(self.app, f"Failed to create macOS installer\n\nOutput: {output}\n\nError: {error}", "Error", wx.OK | wx.ICON_ERROR).ShowModal()
+                self.app.go_home()
                 return
 
             # Step 2: Download and copy AutoPkg-Assets / Metallib / KDK with separate progress & counters
@@ -330,7 +308,7 @@ class macOSInstallerFlashFrame(wx.Frame):
                 "failed": [],
             }
 
-            asset_thread = threading.Thread(target=self._install_installer_pkg, args=(disk['identifier'], root_disk, asset_state))
+            asset_thread = threading.Thread(target=self._install_installer_pkg, args=(disk["identifier"], root_disk, asset_state))
             asset_thread.start()
 
             pulsing = False
@@ -387,14 +365,17 @@ class macOSInstallerFlashFrame(wx.Frame):
             progress_bar_animation = gui_support.GaugePulseCallback(self.constants, progress_bar)
             progress_bar_animation.start_pulse()
 
-            error_message = self._validate_installer_pkg(disk['identifier'])
-
+            error_message = self._validate_installer_pkg(disk["identifier"])
             progress_bar_animation.stop_pulse()
 
             if error_message != "":
                 progress_bar.SetValue(0)
-                wx.MessageBox(f"Failed to validate installer, cannot continue.\n This can generally happen due to a faulty USB drive, as flashing is an intensive process that can trigger hardware faults not normally seen. \n\n{error_message}", "Corrupted Installer!", wx.OK | wx.ICON_ERROR)
-                self.on_return_to_main_menu()
+                wx.MessageBox(
+                    f"Failed to validate installer, cannot continue.\nThis can generally happen due to a faulty USB drive.\n\n{error_message}",
+                    "Corrupted Installer!",
+                    wx.OK | wx.ICON_ERROR,
+                )
+                self.app.go_home()
                 return
 
             progress_bar.SetValue(100)
@@ -408,53 +389,48 @@ class macOSInstallerFlashFrame(wx.Frame):
                     "Autopatching Assets Incomplete",
                     wx.OK | wx.ICON_WARNING,
                 )
-
-            if gui_support.CheckProperties(self.constants).host_can_build() is False:
-                wx.MessageBox("Installer created successfully! If you want to install OpenCore to this USB, you will need to change the Target Model in settings", "Successfully created the macOS installer!", wx.OK | wx.ICON_INFORMATION)
-                self.on_return_to_main_menu()
-                return
-
-            answer = wx.MessageBox("Installer created successfully, would you like to continue and Install OpenCore to this disk?", "Successfully created the macOS installer!", wx.YES_NO | wx.ICON_QUESTION)
-            if answer != wx.YES:
-                self.on_return_to_main_menu()
-                return
-
-            # Install OpenCore
-            self.Hide()
-            gui_build.BuildFrame(
-                parent=None,
-                title=self.title,
-                global_constants=self.constants,
-                screen_location=self.GetScreenPosition()
-            )
-            self.Destroy()
         finally:
+            self.app.set_busy(False)
             utilities.enable_sleep_after_running()
 
+        if gui_support.CheckProperties(self.constants).host_can_build() is False:
+            wx.MessageBox(
+                "Installer created successfully! To install OpenCore to this USB, change Target Model in Settings.",
+                "Successfully created the macOS installer!",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            self.app.go_home()
+            return
 
-    def _prepare_resources(self, installer_path: str, disk: str) -> None:
+        answer = wx.MessageBox(
+            "Installer created successfully! Would you like to continue and build/install OpenCore to this disk?",
+            "Successfully created the macOS installer!",
+            wx.YES_NO | wx.ICON_QUESTION,
+        )
+        if answer == wx.YES:
+            self.app.navigate("build")
+        else:
+            self.app.go_home()
 
-        def prepare_script(self, installer_path: str, disk: str, constants: constants.Constants):
-            self.prepare_result = macos_installer_handler.InstallerCreation().generate_installer_creation_script(constants.payload_path, installer_path, disk)
+    def _prepare_resources(self, installer_path: str, disk: str) -> bool:
+        def _prep():
+            self.prepare_result = macos_installer_handler.InstallerCreation().generate_installer_creation_script(
+                self.constants.payload_path, installer_path, disk
+            )
 
-        thread = threading.Thread(target=prepare_script, args=(self, installer_path, disk, self.constants))
+        thread = threading.Thread(target=_prep)
         thread.start()
-
         gui_support.wait_for_thread(thread)
-
         return self.prepare_result
-
 
     def _flash_installer(self) -> bool:
         logging.info("Creating macOS installer")
-
         with open(self.constants.installer_sh_path, "r") as f:
             logging.info(f"installer.sh contents:\n{f.read()}")
 
-        args   = ["/bin/sh", self.constants.installer_sh_path]
-        result = subprocess_wrapper.run_as_root(args, capture_output=True, text=True)
+        result = subprocess_wrapper.run_as_root(["/bin/sh", self.constants.installer_sh_path], capture_output=True, text=True)
         output = result.stdout
-        error  = result.stderr if result.stderr else ""
+        error = result.stderr if result.stderr else ""
 
         if "Install media now available at" not in output:
             logging.info("Failed to create macOS installer")
@@ -464,11 +440,7 @@ class macOSInstallerFlashFrame(wx.Frame):
         logging.info("Successfully created macOS installer")
         return True
 
-
     def _auto_package_handler(self, download_dir: Path, root_disk: str, asset_state: dict) -> None:
-        """
-        Grab AutoPkg-Assets.pkg, extract if zipped, and copy onto the target installer volume
-        """
         asset_state.update(stage="Installing AutoPkg-Assets.pkg...", detail="Checking download link", download=None, copy_label=None)
 
         link = self.constants.installer_pkg_url
@@ -481,10 +453,7 @@ class macOSInstallerFlashFrame(wx.Frame):
                 asset_state["failed"].append(("AutoPkg-Assets.pkg", reason))
                 return
 
-        if link.endswith(".zip"):
-            path = self.constants.installer_pkg_zip_path
-        else:
-            path = self.constants.installer_pkg_path
+        path = self.constants.installer_pkg_zip_path if link.endswith(".zip") else self.constants.installer_pkg_path
 
         autopkg_download = network_handler.DownloadObject(link, path)
         asset_state["detail"] = "Downloading AutoPkg-Assets.pkg"
@@ -522,10 +491,9 @@ class macOSInstallerFlashFrame(wx.Frame):
         if copy_res.returncode != 0:
             asset_state["failed"].append(("AutoPkg-Assets.pkg", "Failed to copy package onto USB installer"))
 
-
     def _install_installer_pkg(self, disk: str, root_disk: str, asset_state: dict) -> None:
         logging.info("Installing Root Patcher assets to drive")
-        disk = disk + "s2" # ESP sits at 1, and we know macOS will have created the main partition at 2
+        disk = disk + "s2"
 
         try:
             path = utilities.grab_mount_point_from_disk(disk)
@@ -553,26 +521,15 @@ class macOSInstallerFlashFrame(wx.Frame):
             asset_state["copy_label"] = None
             asset_state["failed"].append(("Autopatching Assets", str(e)))
 
-
     def _kdk_chainload(self, build: str, version: str, download_dir: Path, root_disk: str, asset_state: dict) -> None:
-        """
-        Download the correct KDK to be chainloaded in the macOS installer
-        """
         asset_state.update(stage="Installing Kernel Debug Kit...", detail="Checking KDK catalog", download=None, copy_label=None)
 
         kdk_dmg_path = Path(download_dir) / "KDK.dmg"
         kdk_pkg_path = Path(download_dir) / "KDK.pkg"
+        kdk_dmg_path.unlink(missing_ok=True)
+        kdk_pkg_path.unlink(missing_ok=True)
 
-        if kdk_dmg_path.exists():
-            kdk_dmg_path.unlink()
-        if kdk_pkg_path.exists():
-            kdk_pkg_path.unlink()
-
-        logging.info("Initiating KDK download")
-        logging.info(f"- Build: {build}")
-        logging.info(f"- Version: {version}")
-        logging.info(f"- Working Directory: {download_dir}")
-
+        logging.info(f"Initiating KDK download (Build: {build}, Version: {version})")
         kdk_obj = kdk_handler.KernelDebugKitObject(self.constants, build, version, ignore_installed=True)
         if kdk_obj.success is False:
             reason = kdk_obj.error_msg or "Unable to resolve matching KDK"
@@ -582,7 +539,6 @@ class macOSInstallerFlashFrame(wx.Frame):
 
         space = utilities.get_free_space(download_dir)
         if space < (kdk_obj.kdk_url_expected_size * 2):
-            logging.info("Not enough disk space to download and install KDK on USB directly")
             if space < kdk_obj.kdk_url_expected_size:
                 reason = "Not enough free disk space on USB installer for KDK"
                 logging.info(reason)
@@ -615,10 +571,8 @@ class macOSInstallerFlashFrame(wx.Frame):
 
         with tempfile.TemporaryDirectory() as mount_point:
             asset_state["detail"] = "Mounting KDK.dmg..."
-            logging.info("Mounting KDK")
             result = subprocess.run(["/usr/bin/hdiutil", "attach", kdk_dmg_path, "-mountpoint", mount_point, "-nobrowse"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if result.returncode != 0:
-                logging.info("Failed to mount KDK")
                 subprocess_wrapper.log(result)
                 asset_state["failed"].append(("Kernel Debug Kit (KDK)", "Failed to mount KDK disk image"))
                 return
@@ -626,40 +580,26 @@ class macOSInstallerFlashFrame(wx.Frame):
             asset_state["detail"] = ""
             asset_state["copy_base_mb"] = self._read_disk_mb(root_disk)
             asset_state["copy_label"] = "Copying KernelDebugKit.pkg"
-            logging.info("Copying KDK")
             copy_res = subprocess.run(generate_copy_arguments(f"{mount_point}/KernelDebugKit.pkg", kdk_pkg_path))
             asset_state["copy_label"] = None
 
             asset_state["detail"] = "Unmounting KDK.dmg..."
-            logging.info("Unmounting KDK")
             result = subprocess.run(["/usr/bin/hdiutil", "detach", mount_point], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if result.returncode != 0:
-                logging.info("Failed to unmount KDK")
                 subprocess_wrapper.log(result)
 
             if copy_res.returncode != 0:
                 asset_state["failed"].append(("Kernel Debug Kit (KDK)", "Failed to copy KernelDebugKit.pkg onto USB installer"))
 
-        logging.info("Removing KDK Disk Image")
         kdk_dmg_path.unlink(missing_ok=True)
 
-
     def _chainload_metallib(self, build: str, version: str, download_dir: Path, root_disk: str, asset_state: dict) -> None:
-        """
-        Download the correct Metallib to be chainloaded in the macOS installer
-        """
         asset_state.update(stage="Installing MetallibSupportPkg...", detail="Checking Metallib catalog", download=None, copy_label=None)
 
         metallib_pkg_path = Path(download_dir) / "MetallibSupportPkg.pkg"
+        metallib_pkg_path.unlink(missing_ok=True)
 
-        if metallib_pkg_path.exists():
-            metallib_pkg_path.unlink()
-
-        logging.info("Initiating Metallib download")
-        logging.info(f"- Build: {build}")
-        logging.info(f"- Version: {version}")
-        logging.info(f"- Working Directory: {download_dir}")
-
+        logging.info(f"Initiating Metallib download (Build: {build}, Version: {version})")
         metallib_obj = metallib_handler.MetalLibraryObject(self.constants, build, version, ignore_installed=True)
         if metallib_obj.success is False:
             reason = metallib_obj.error_msg or "Unable to resolve matching Metallib"
@@ -674,9 +614,7 @@ class macOSInstallerFlashFrame(wx.Frame):
             asset_state["failed"].append(("MetallibSupportPkg.pkg", reason))
             return
 
-        space = utilities.get_free_space(download_dir)
-        size = 100 * 1024 * 1024
-        if space < size:
+        if utilities.get_free_space(download_dir) < 100 * 1024 * 1024:
             reason = "Not enough disk space on USB installer to download MetallibSupportPkg"
             logging.info(reason)
             asset_state["failed"].append(("MetallibSupportPkg.pkg", reason))
@@ -695,14 +633,12 @@ class macOSInstallerFlashFrame(wx.Frame):
             return
 
         if not metallib_pkg_path.exists():
-            logging.info(f"Metallib missing: {metallib_pkg_path}")
             asset_state["failed"].append(("MetallibSupportPkg.pkg", "Downloaded package missing"))
-            return
 
-
-    def _validate_installer_pkg(self, disk: str) -> bool:
+    def _validate_installer_pkg(self, disk: str) -> str:
         logging.info("Validating installer pkg")
         error_message = ""
+
         def _integrity_check():
             nonlocal error_message
             dmg_path = None
@@ -714,7 +650,7 @@ class macOSInstallerFlashFrame(wx.Frame):
             if dmg_path is None or not Path(dmg_path).exists():
                 logging.error(f"Failed to find {dmg_path}")
                 error_message = f"Failed to find {dmg_path}"
-                return error_message
+                return
             result = subprocess.run(["/usr/bin/hdiutil", "verify", dmg_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result.returncode != 0:
                 if result.stdout:
@@ -724,33 +660,10 @@ class macOSInstallerFlashFrame(wx.Frame):
                     logging.error(result.stderr.decode("utf-8"))
                     error_message += "\n\nSTDERR: " + result.stderr.decode("utf-8")
 
-
         thread = threading.Thread(target=_integrity_check)
         thread.start()
         gui_support.wait_for_thread(thread)
 
         if error_message == "":
             logging.info("Installer pkg validated")
-            return error_message
-
         return error_message
-
-
-    def on_return_to_main_menu(self, event: wx.Event = None):
-        if self.frame_modal:
-            self.frame_modal.Hide()
-        if self:
-            if isinstance(self, wx.Frame):
-                self.Hide()
-        main_menu_frame = gui_main_menu.MainFrame(
-            None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetScreenPosition()
-        )
-        main_menu_frame.Show()
-        if self.frame_modal:
-            self.frame_modal.Destroy()
-        if self:
-            if isinstance(self, wx.Frame):
-                self.Destroy()

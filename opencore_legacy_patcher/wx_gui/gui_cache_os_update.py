@@ -1,6 +1,5 @@
 """
-gui_cache_os_update.py: UI to display to users before a macOS update is applied
-Primarily for caching updates required for incoming OS (ex. KDKs)
+gui_cache_os_update.py: UI for caching KDK/Metallib resources prior to macOS Software Update
 """
 
 import wx
@@ -13,253 +12,148 @@ from pathlib import Path
 
 from .. import constants
 from ..support import kdk_handler, utilities, metallib_handler
-from ..wx_gui import gui_support, gui_download
-
+from ..wx_gui import gui_support
 from ..sys_patch.patchsets import HardwarePatchsetDetection, HardwarePatchsetSettings
 
 
-class OSUpdateFrame(wx.Frame):
+class OSCachePanel(wx.Panel):
     """
-    Create a modal frame for displaying information to the user before an update is applied
+    In-window panel for caching KDK and Metallib packages when a staged OS update needs them
     """
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None):
-        logging.info("Initializing Prepare Update Frame")
 
-        if parent:
-            self.frame = parent
-        else:
-            super().__init__(parent, title=title, size=(360, 140), style=wx.DEFAULT_FRAME_STYLE ^ wx.RESIZE_BORDER ^ wx.MAXIMIZE_BOX)
-            self.frame = self
-            self.frame.Centre()
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        logging.info("Initializing Prepare Update Panel")
+        self.app = app
+        self.constants = global_constants
+        self.os_data = utilities.fetch_staged_update(variant="Preflight")
+        self.did_cancel = -1
+        self.download_obj = None
 
-        self.title = title
-        self.constants: constants.Constants = global_constants
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(gui_support.PageHeader(self, "Preparing for macOS Software Update"), 0, wx.EXPAND)
+        sizer.AddStretchSpacer(1)
 
-        os_data = utilities.fetch_staged_update(variant="Preflight")
-        if os_data[0] is None:
+        os_str = f"macOS {self.os_data[0]} ({self.os_data[1]})" if self.os_data[0] else ""
+        self.info_label = wx.StaticText(self, label=f"{os_str}\nChecking required support packages...", style=wx.ALIGN_CENTER_HORIZONTAL)
+        self.info_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        sizer.Add(self.info_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 14)
+
+        self.progress_bar = wx.Gauge(self, range=100, size=(360, 22))
+        self.progress_bar.Pulse()
+        sizer.Add(self.progress_bar, 0, wx.ALIGN_CENTER_HORIZONTAL)
+        sizer.AddStretchSpacer(2)
+        self.SetSizer(sizer)
+
+    @staticmethod
+    def needs_caching(global_constants: constants.Constants) -> bool:
+        staged = utilities.fetch_staged_update(variant="Preflight")
+        if staged[0] is None:
             logging.info("No staged update found")
-            self._exit()
-        logging.info(f"Staged update found: {os_data[0]} ({os_data[1]})")
-        self.os_data = os_data
+            return False
+        results = HardwarePatchsetDetection(
+            constants=global_constants,
+            xnu_major=int(staged[1][:2]),
+            xnu_minor=0,
+            os_build=staged[1],
+            os_version=staged[0],
+        ).device_properties
+        return any([
+            results[HardwarePatchsetSettings.KERNEL_DEBUG_KIT_REQUIRED],
+            results[HardwarePatchsetSettings.METALLIB_SUPPORT_PKG_REQUIRED],
+        ])
 
-        # Check if we need to patch the system volume
+    def start(self) -> None:
+        if self.os_data[0] is None:
+            sys.exit(0)
+
         results = HardwarePatchsetDetection(
             constants=self.constants,
             xnu_major=int(self.os_data[1][:2]),
-            xnu_minor=0, # We can't determine this from the build number
+            xnu_minor=0,
             os_build=self.os_data[1],
             os_version=self.os_data[0],
         ).device_properties
 
-        if results[HardwarePatchsetSettings.KERNEL_DEBUG_KIT_REQUIRED] is True:
-            logging.info("KDK required")
-        if results[HardwarePatchsetSettings.METALLIB_SUPPORT_PKG_REQUIRED] is True:
-            # TODO: Download MetalLibSupportPkg
-            logging.info("MetallibSupportPkg required")
-
         if not any([results[HardwarePatchsetSettings.KERNEL_DEBUG_KIT_REQUIRED], results[HardwarePatchsetSettings.METALLIB_SUPPORT_PKG_REQUIRED]]):
             logging.info("No additional resources required")
-            self._exit()
+            sys.exit(0)
 
-        self._generate_ui()
-
-        self.kdk_obj: kdk_handler.KernelDebugKitObject = None
-        def _kdk_thread_spawn():
-            self.kdk_obj = kdk_handler.KernelDebugKitObject(self.constants, self.os_data[1], self.os_data[0], passive=True, check_backups_only=True)
-
-
-        self.metallib_obj: metallib_handler.MetalLibraryObject = None
-        def _metallib_thread_spawn():
-            self.metallib_obj = metallib_handler.MetalLibraryObject(self.constants, self.os_data[1], self.os_data[0])
-
+        self.kdk_obj = None
+        self.metallib_obj = None
 
         if results[HardwarePatchsetSettings.KERNEL_DEBUG_KIT_REQUIRED] is True:
-            kdk_thread = threading.Thread(target=_kdk_thread_spawn)
-            kdk_thread.start()
-            gui_support.wait_for_thread(kdk_thread)
+            t = threading.Thread(target=lambda: setattr(self, "kdk_obj", kdk_handler.KernelDebugKitObject(self.constants, self.os_data[1], self.os_data[0], passive=True, check_backups_only=True)))
+            t.start()
+            gui_support.wait_for_thread(t)
+
         if results[HardwarePatchsetSettings.METALLIB_SUPPORT_PKG_REQUIRED] is True:
-            metallib_thread = threading.Thread(target=_metallib_thread_spawn)
-            metallib_thread.start()
-            gui_support.wait_for_thread(metallib_thread)
+            t = threading.Thread(target=lambda: setattr(self, "metallib_obj", metallib_handler.MetalLibraryObject(self.constants, self.os_data[1], self.os_data[0])))
+            t.start()
+            gui_support.wait_for_thread(t)
 
+        download_objects = {}
+        if self.kdk_obj and self.kdk_obj.success is True:
+            res = self.kdk_obj.retrieve_download()
+            if res is not None:
+                download_objects[f"KDK Build {self.kdk_obj.kdk_url_build}"] = res
+        if self.metallib_obj and self.metallib_obj.success is True:
+            res = self.metallib_obj.retrieve_download()
+            if res is not None:
+                download_objects[f"Metallib Build {self.metallib_obj.metallib_url_build}"] = res
 
-        download_objects = {
-            # Name: xxx
-            # download_obj: xxx
-        }
-
-        if self.kdk_obj:
-            if self.kdk_obj.success is True:
-                result = self.kdk_obj.retrieve_download()
-                if result is not None:
-                    download_objects[f"KDK Build {self.kdk_obj.kdk_url_build}"] = result
-        if self.metallib_obj:
-            if self.metallib_obj.success is True:
-                result = self.metallib_obj.retrieve_download()
-                if result is not None:
-                    download_objects[f"Metallib Build {self.metallib_obj.metallib_url_build}"] = result
-
-        if len(download_objects) == 0:
-            self._exit()
-
-        self.frame.Show()
+        if not download_objects:
+            sys.exit(0)
 
         self.did_cancel = -1
-        self._notifyUser()
+        threading.Thread(target=self._notify_user_thread, daemon=True).start()
 
-        # Allow 10 seconds for the user to cancel the download
-        # If nothing, continue
-        for i in range(0, 10):
+        for _ in range(10):
             if self.did_cancel == 1:
-                self._exit()
+                sys.exit(0)
             if self.did_cancel == -1:
+                wx.Yield()
                 time.sleep(1)
 
-        for item in download_objects:
-            name = item
-            download_obj = download_objects[item]
-            self.download_obj = download_obj
-            gui_download.DownloadFrame(
-                self,
-                title=self.title,
-                global_constants=self.constants,
-                download_obj=download_obj,
-                item_name=name
-            )
-            if download_obj.download_complete is True:
-                if item.startswith("KDK"):
+        for name, dl_obj in download_objects.items():
+            self.download_obj = dl_obj
+            if self.app.show_download(dl_obj, name):
+                if name.startswith("KDK"):
                     self._handle_kdk(self.kdk_obj)
-                if item.startswith("Metallib"):
+                elif name.startswith("Metallib"):
                     self._handle_metallib(self.metallib_obj)
 
-        self._exit()
+        sys.exit(0)
 
-
-    def _handle_kdk(self, kdk_obj: kdk_handler.KernelDebugKitObject) -> None:
-        """
-        Handle KDK installation
-        """
-        logging.info("KDK download complete, validating with hdiutil")
-        self.kdk_checksum_result = False
-        def _validate_kdk_checksum_thread():
-            self.kdk_checksum_result = kdk_obj.validate_kdk_checksum()
-
-        kdk_checksum_thread = threading.Thread(target=_validate_kdk_checksum_thread)
-        kdk_checksum_thread.start()
-
-        gui_support.wait_for_thread(kdk_checksum_thread)
-
-        if self.kdk_checksum_result is False:
-            logging.error("KDK checksum validation failed")
-            logging.error(kdk_obj.error_msg)
-            self._exit()
-
-
-        logging.info("KDK checksum validation passed")
-
-        logging.info("Mounting KDK")
-        if not Path(self.constants.kdk_download_path).exists():
-            logging.error("KDK download path does not exist")
-            return
-
-        self.kdk_install_result = False
-        def _install_kdk_thread():
-            self.kdk_install_result = kdk_handler.KernelDebugKitUtilities().install_kdk_dmg(self.constants.kdk_download_path, only_install_backup=True)
-
-        kdk_install_thread = threading.Thread(target=_install_kdk_thread)
-        kdk_install_thread.start()
-
-        gui_support.wait_for_thread(kdk_install_thread)
-
-        if self.kdk_install_result is False:
-            logging.info("Failed to install KDK")
-            return
-
-        logging.info("KDK installed successfully")
-
-
-
-    def _handle_metallib(self, metallib_obj: metallib_handler.MetalLibraryObject) -> None:
-        """
-        Handle Metallib installation
-        """
-        self.metallib_install_result = False
-        def _install_metallib_thread():
-            self.metallib_install_result = metallib_obj.install_metallib()
-
-        metallib_install_thread = threading.Thread(target=_install_metallib_thread)
-        metallib_install_thread.start()
-
-        gui_support.wait_for_thread(metallib_install_thread)
-
-        if self.metallib_install_result is False:
-            logging.info("Failed to install Metallib")
-            return
-
-        logging.info("Metallib installed successfully")
-
-
-    def _generate_ui(self) -> None:
-        """
-        Display frame
-
-
-        Title: OpenCore Legacy Patcher is preparing to update your system
-        Body:  Please wait while we prepare your system for the update.
-               This may take a few minutes.
-        """
-
-        header = wx.StaticText(self.frame, label="Preparing for macOS Software Update", pos=(-1,5))
-        header.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        header.Centre(wx.HORIZONTAL)
-
-        # list OS
-        label = wx.StaticText(self.frame, label=f"macOS {self.os_data[0]} ({self.os_data[1]})", pos=(-1, 35))
-        label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        label.Centre(wx.HORIZONTAL)
-
-        # this may take a few minutes
-        label = wx.StaticText(self.frame, label="This may take a few minutes.", pos=(-1, 55))
-        label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        label.Centre(wx.HORIZONTAL)
-
-        # Add a progress bar
-        self.progress_bar = wx.Gauge(self.frame, range=100, pos=(10, 75), size=(340, 20))
-        self.progress_bar.SetValue(0)
-        self.progress_bar.Pulse()
-
-        # Set frame size below progress bar
-        self.frame.SetSize((360, 140))
-
-
-    def _notifyUser(self) -> None:
-        """
-        Notify user of what OCLP is doing
-        Note will be spawned through wx.CallAfter
-        """
-        threading.Thread(target=self._notifyUserThread).start()
-
-
-    def _notifyUserThread(self) -> None:
-        """
-        Notify user of what OCLP is doing
-        """
-        message=f"OpenCore Legacy Patcher has detected that a macOS update is being downloaded:\n{self.os_data[0]} ({self.os_data[1]})\n\nThe patcher needs to prepare the system for the update, and will download any additional resources it may need post-update.\n\nThis may take a few minutes, the patcher will exit when it is done."
-        # Yes/No for caching
-        dlg = wx.MessageDialog(self.frame, message=message, caption="OpenCore Legacy Patcher", style=wx.YES_NO | wx.ICON_INFORMATION)
+    def _notify_user_thread(self) -> None:
+        msg = (
+            f"OpenCore Legacy Patcher detected a staged macOS update:\n{self.os_data[0]} ({self.os_data[1]})\n\n"
+            "The patcher needs to download support resources required post-update.\n\n"
+            "This may take a few minutes; the patcher will exit when done."
+        )
+        dlg = wx.MessageDialog(self.app, message=msg, caption="OpenCore Legacy Patcher", style=wx.YES_NO | wx.ICON_INFORMATION)
         dlg.SetYesNoLabels("&Ok", "&Cancel")
-        result = dlg.ShowModal()
-        if result == wx.ID_NO:
+        if dlg.ShowModal() == wx.ID_NO:
             logging.info("User cancelled OS caching")
-            if hasattr(self, "download_obj"):
+            if self.download_obj:
                 self.download_obj.stop()
             self.did_cancel = 1
         else:
             self.did_cancel = 0
 
-    def _exit(self):
-        """
-        Exit the frame
-        """
-        self.frame.Close()
-        sys.exit()
+    def _handle_kdk(self, kdk_obj: kdk_handler.KernelDebugKitObject) -> None:
+        self.kdk_checksum_result = False
+        t = threading.Thread(target=lambda: setattr(self, "kdk_checksum_result", kdk_obj.validate_kdk_checksum()))
+        t.start()
+        gui_support.wait_for_thread(t)
+        if not self.kdk_checksum_result or not Path(self.constants.kdk_download_path).exists():
+            return
+
+        t = threading.Thread(target=lambda: kdk_handler.KernelDebugKitUtilities().install_kdk_dmg(self.constants.kdk_download_path, only_install_backup=True))
+        t.start()
+        gui_support.wait_for_thread(t)
+
+    def _handle_metallib(self, metallib_obj: metallib_handler.MetalLibraryObject) -> None:
+        t = threading.Thread(target=metallib_obj.install_metallib)
+        t.start()
+        gui_support.wait_for_thread(t)

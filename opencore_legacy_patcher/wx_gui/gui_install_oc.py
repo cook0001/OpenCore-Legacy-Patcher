@@ -1,5 +1,5 @@
 """
-gui_install_oc.py: Frame for installing OpenCore to disk
+gui_install_oc.py: In-window UI for installing OpenCore to disk
 """
 
 import wx
@@ -8,357 +8,229 @@ import threading
 import traceback
 
 from .. import constants
-
 from ..datasets import os_data
 from ..support import install
-
-from ..wx_gui import (
-    gui_main_menu,
-    gui_support,
-    gui_sys_patch_display
-)
+from ..wx_gui import gui_support, gui_strings
 
 
-class InstallOCFrame(wx.Frame):
+class InstallOCPanel(wx.Panel):
     """
-    Create a frame for installing OpenCore to disk
+    Multi-step disk/volume selection and OpenCore installation panel
     """
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None):
-        logging.info("Initializing Install OpenCore Frame")
-        super(InstallOCFrame, self).__init__(parent, title=title, size=(300, 120), style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX))
-        gui_support.GenerateMenubar(self, global_constants).generate()
 
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        logging.info("Initializing Install OpenCore Panel")
+        self.app = app
+        self.constants = global_constants
+        self.available_disks: dict = {}
         self.result: bool = False
+        self.active_step: wx.Panel = None
 
-        self.available_disks: dict = None
-        self.stock_output = logging.getLogger().handlers[0].stream
-
-        self.progress_bar_animation: gui_support.GaugePulseCallback = None
-
-        self.hyperlink_colour = (25, 179, 231)
-
-        self._generate_elements()
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.sizer)
 
         if self.constants.update_stage != gui_support.AutoUpdateStages.INACTIVE:
             self.constants.update_stage = gui_support.AutoUpdateStages.INSTALLING
 
-        self.Centre()
-        self.Show()
+    def start(self) -> None:
+        self._scan_disks()
 
-        self._display_disks()
+    def _set_step(self, panel: wx.Panel) -> None:
+        if self.active_step is not None:
+            self.sizer.Detach(self.active_step)
+            self.active_step.Destroy()
+        self.active_step = panel
+        self.sizer.Add(panel, 1, wx.EXPAND)
+        self.Layout()
 
+    def _scan_disks(self) -> None:
+        self._set_step(
+            gui_support.IndeterminateProgressPanel(
+                self,
+                self.constants,
+                gui_strings.INSTALL_OC["title"],
+                message=gui_strings.INSTALL_OC["fetching_disks"],
+                on_back=self.app.go_home,
+            )
+        )
 
-    def _generate_elements(self) -> None:
-        """
-        Display indeterminate progress bar while collecting disk information
-
-        Format:
-            - Title label:        Install OpenCore
-            - Text:               Fetching information on local disks...
-            - Progress bar:       {indeterminate}
-        """
-
-        # Title label: Install OpenCore
-        title_label = wx.StaticText(self, label="Install OpenCore", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        # Text: Parsing local disks...
-        text_label = wx.StaticText(self, label="Fetching information on local disks...", pos=(-1,30))
-        text_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        text_label.Centre(wx.HORIZONTAL)
-        self.text_label = text_label
-
-        # Progress bar: {indeterminate}
-        progress_bar = wx.Gauge(self, range=100, pos=(-1, text_label.GetPosition()[1] + text_label.GetSize()[1]), size=(150, 30), style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
-        progress_bar.Centre(wx.HORIZONTAL)
-
-        progress_bar_animation = gui_support.GaugePulseCallback(self.constants, progress_bar)
-        progress_bar_animation.start_pulse()
-
-        self.progress_bar_animation = progress_bar_animation
-        self.progress_bar = progress_bar
-
-
-    def _fetch_disks(self) -> None:
-        """
-        Fetch information on local disks
-        """
-        self.available_disks = install.disk_installation(self.constants).list_disks()
-
-        # Need to clean up output on pre-Sierra
-        # Disk images are mixed in with regular disks (ex. payloads.dmg)
-        ignore = ["disk image", "read-only", "virtual"]
-        for disk in self.available_disks.copy():
-            if any(string in self.available_disks[disk]['name'].lower() for string in ignore):
-                del self.available_disks[disk]
-
-
-    def _display_disks(self) -> None:
-        """
-        Display disk selection dialog
-        """
         thread = threading.Thread(target=self._fetch_disks)
         thread.start()
-
         gui_support.wait_for_thread(thread)
+        self._show_disk_list()
 
-        self.progress_bar_animation.stop_pulse()
-        self.progress_bar.Hide()
+    def _fetch_disks(self) -> None:
+        self.available_disks = install.disk_installation(self.constants).list_disks() or {}
+        ignore = ("disk image", "read-only", "virtual")
+        for disk in list(self.available_disks.keys()):
+            if any(token in self.available_disks[disk]["name"].lower() for token in ignore):
+                del self.available_disks[disk]
 
-        # Create wxDialog for disk selection
-        dialog = wx.Dialog(self, title=self.title, size=(380, -1))
+    def _show_disk_list(self) -> None:
+        step = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(
+            gui_support.PageHeader(
+                step,
+                gui_strings.INSTALL_OC["title"],
+                subtitle=gui_strings.INSTALL_OC["select_disk"],
+                back_label=gui_strings.NAV["return_main"],
+                on_back=self.app.go_home,
+            ),
+            0,
+            wx.EXPAND,
+        )
 
-        # Title label: Install OpenCore
-        title_label = wx.StaticText(dialog, label="Install OpenCore", pos=(-1,5))
-        title_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
+        note = wx.StaticText(step, label=gui_strings.INSTALL_OC["gpt_note"])
+        note.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
+        note.SetForegroundColour(wx.Colour(128, 128, 128))
+        outer.Add(note, 0, wx.LEFT | wx.RIGHT | wx.TOP, 16)
 
-        # Text: select disk to install OpenCore onto
-        text_label = wx.StaticText(dialog, label="Select disk to install OpenCore onto:", pos=(-1, title_label.GetPosition()[1] + title_label.GetSize()[1] + 5))
-        text_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        text_label.Centre(wx.HORIZONTAL)
+        scroll = wx.ScrolledWindow(step, style=wx.VSCROLL)
+        scroll.SetScrollRate(0, 16)
+        list_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        # Add note: "Missing disks? Ensure they're FAT32 or formatted as GUID/GPT"
-        gpt_note = wx.StaticText(dialog, label="Missing disks? Ensure they're FAT32 or formatted as GUID/GPT", pos=(-1, text_label.GetPosition()[1] + text_label.GetSize()[1] + 5))
-        gpt_note.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
-        gpt_note.Centre(wx.HORIZONTAL)
+        disk_root = None
+        if self.constants.booted_oc_disk and self.constants.custom_model is None:
+            stripped = self.constants.booted_oc_disk.replace("disk", "", 1)
+            disk_root = "disk" + stripped.split("s")[0]
+            logging.info(f"Checking if booted disk is present: {disk_root}")
 
-        # Add buttons for each disk
         if self.available_disks:
-            # Only show booted disk if building for host
-            disk_root = self.constants.booted_oc_disk if self.constants.custom_model is None else None
-            if disk_root:
-                # disk6s1 -> disk6
-                disk_root = self.constants.booted_oc_disk.strip("disk")
-                disk_root = "disk" + disk_root.split("s")[0]
-                logging.info(f"Checking if booted disk is present: {disk_root}")
-
-            # Add buttons for each disk
-            items = len(self.available_disks)
-            longest_label = max((len(self.available_disks[disk]['disk']) + len(self.available_disks[disk]['name']) + len(str(self.available_disks[disk]['size']))) for disk in self.available_disks)
-            longest_label = longest_label * 9
-            spacer = 0
             logging.info("Available disks:")
-            for disk in self.available_disks:
-                # Create a button for each disk
-                logging.info(f"- {self.available_disks[disk]['disk']} - {self.available_disks[disk]['name']} - {self.available_disks[disk]['size']}")
-                disk_button = wx.Button(dialog, label=f"{self.available_disks[disk]['disk']} - {self.available_disks[disk]['name']} - {self.available_disks[disk]['size']}", size=(longest_label ,30), pos=(-1, gpt_note.GetPosition()[1] + gpt_note.GetSize()[1] + 5 + spacer))
-                disk_button.Centre(wx.HORIZONTAL)
-                disk_button.Bind(wx.EVT_BUTTON, lambda event, disk=disk: self._display_volumes(disk, self.available_disks))
-                if disk_root == self.available_disks[disk]['disk'] or items == 1:
-                    disk_button.SetDefault()
-                spacer += 25
-
-            if disk_root:
-                # Add note: "Note: Blue represent the disk OpenCore is currently booted from"
-                disk_label = wx.StaticText(dialog, label="Note: Blue represent the disk OpenCore is currently booted from", pos=(-1, disk_button.GetPosition()[1] + disk_button.GetSize()[1] + 5))
-                disk_label.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
-                disk_label.Centre(wx.HORIZONTAL)
-            else:
-                disk_label = wx.StaticText(dialog, label="", pos=(-1, disk_button.GetPosition()[1] + 15))
-                disk_label.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
+            single_item = len(self.available_disks) == 1
+            for disk_key, info in self.available_disks.items():
+                logging.info(f"- {info['disk']} - {info['name']} - {info['size']}")
+                is_booted = disk_root == info["disk"]
+                prefix = "* " if is_booted else ""
+                btn = wx.Button(scroll, label=f"{prefix}{info['disk']} - {info['name']} - {info['size']}", size=(460, 32))
+                btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                btn.Bind(wx.EVT_BUTTON, lambda event, dk=disk_key: self._show_volumes(dk))
+                if is_booted or single_item:
+                    btn.SetDefault()
+                list_sizer.Add(btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
         else:
-            # Text: Failed to find any applicable disks
-            disk_label = wx.StaticText(dialog, label="Failed to find any applicable disks", pos=(-1, gpt_note.GetPosition()[1] + gpt_note.GetSize()[1] + 5))
-            disk_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-            disk_label.Centre(wx.HORIZONTAL)
+            empty = wx.StaticText(scroll, label=gui_strings.INSTALL_OC["no_disks"])
+            empty.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+            list_sizer.Add(empty, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 20)
 
-        # Add button: Search for disks again
-        search_button = wx.Button(dialog, label="Search for disks again", size=(150,30), pos=(-1, disk_label.GetPosition()[1] + disk_label.GetSize()[1] + 5))
-        search_button.Centre(wx.HORIZONTAL)
-        search_button.Bind(wx.EVT_BUTTON, self.on_reload_frame)
+        scroll.SetSizer(list_sizer)
+        scroll.FitInside()
+        outer.Add(scroll, 1, wx.EXPAND | wx.ALL, 16)
 
-        # Add button: Return to main menu
-        return_button = wx.Button(dialog, label="Return to Main Menu", size=(150,30), pos=(-1, search_button.GetPosition()[1] + 20))
-        return_button.Centre(wx.HORIZONTAL)
-        return_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
+        if disk_root:
+            booted_note = wx.StaticText(step, label=gui_strings.INSTALL_OC["booted_note"])
+            booted_note.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
+            booted_note.SetForegroundColour(wx.Colour(128, 128, 128))
+            outer.Add(booted_note, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 6)
 
-        # Set size
-        dialog.SetSize((-1, return_button.GetPosition()[1] + return_button.GetSize()[1] + 40))
-        dialog.ShowWindowModal()
-        self.dialog = dialog
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        rescan_btn = wx.Button(step, label=gui_strings.INSTALL_OC["search_again"], size=(160, 30))
+        rescan_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        rescan_btn.Bind(wx.EVT_BUTTON, lambda event: self._scan_disks())
+        btn_row.Add(rescan_btn, 0, wx.RIGHT, 10)
 
+        back_btn = wx.Button(step, label=gui_strings.NAV["return_main"], size=(170, 30))
+        back_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        back_btn.Bind(wx.EVT_BUTTON, lambda event: self.app.go_home())
+        btn_row.Add(back_btn, 0)
 
-    def _display_volumes(self, disk: str, dataset: dict) -> None:
-        """
-        List volumes on disk
-        """
+        outer.Add(btn_row, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 16)
+        step.SetSizer(outer)
+        self._set_step(step)
 
-        self.dialog.Close()
-
-        # Create dialog
-        dialog = wx.Dialog(
-            self,
-            title=f"Volumes on {disk}",
-            style=wx.CAPTION | wx.CLOSE_BOX,
-            size=(300, 300)
+    def _show_volumes(self, disk_key: str) -> None:
+        step = wx.Panel(self)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(
+            gui_support.PageHeader(
+                step,
+                gui_strings.INSTALL_OC["volumes_title"].format(disk=disk_key),
+                back_label=gui_strings.NAV["back"],
+                on_back=self._show_disk_list,
+            ),
+            0,
+            wx.EXPAND,
         )
 
-        # Add text: "Volumes on {disk}"
-        text_label = wx.StaticText(dialog, label=f"Volumes on {disk}", pos=(-1, 10))
-        text_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        text_label.Centre(wx.HORIZONTAL)
+        scroll = wx.ScrolledWindow(step, style=wx.VSCROLL)
+        scroll.SetScrollRate(0, 16)
+        list_sizer = wx.BoxSizer(wx.VERTICAL)
 
-        partitions = install.disk_installation(self.constants).list_partitions(disk, dataset)
-        items = len(partitions)
-        longest_label = max((len(partitions[partition]['partition']) + len(partitions[partition]['name']) + len(str(partitions[partition]['size']))) for partition in partitions)
-        longest_label = longest_label * 10
-        spacer = 0
-        logging.info(f"Available partitions for {disk}:")
-        for partition in partitions:
-            logging.info(f"- {partitions[partition]['partition']} - {partitions[partition]['name']} - {partitions[partition]['size']}")
-            disk_button = wx.Button(dialog, label=f"{partitions[partition]['partition']} - {partitions[partition]['name']} - {partitions[partition]['size']}", size=(longest_label,30), pos=(-1, text_label.GetPosition()[1] + text_label.GetSize()[1] + 5 + spacer))
-            disk_button.Centre(wx.HORIZONTAL)
-            disk_button.Bind(wx.EVT_BUTTON, lambda event, partition=partition: self._install_oc_process(partition))
-            if items == 1 or self.constants.booted_oc_disk == partitions[partition]['partition']:
-                disk_button.SetDefault()
-            spacer += 25
+        partitions = install.disk_installation(self.constants).list_partitions(disk_key, self.available_disks) or {}
+        single_part = len(partitions) == 1
+        logging.info(f"Available partitions for {disk_key}:")
+        for part_key, pinfo in partitions.items():
+            logging.info(f"- {pinfo['partition']} - {pinfo['name']} - {pinfo['size']}")
+            btn = wx.Button(scroll, label=f"{pinfo['partition']} - {pinfo['name']} - {pinfo['size']}", size=(460, 32))
+            btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+            btn.Bind(wx.EVT_BUTTON, lambda event, p=part_key: self._run_install(p))
+            if single_part or self.constants.booted_oc_disk == pinfo["partition"]:
+                btn.SetDefault()
+            list_sizer.Add(btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
 
-        # Add button: Return to main menu
-        return_button = wx.Button(dialog, label="Return to Main Menu", size=(150,30), pos=(-1, disk_button.GetPosition()[1] + disk_button.GetSize()[1]))
-        return_button.Centre(wx.HORIZONTAL)
-        return_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
+        scroll.SetSizer(list_sizer)
+        scroll.FitInside()
+        outer.Add(scroll, 1, wx.EXPAND | wx.ALL, 16)
 
-        # Set size
-        dialog.SetSize((-1, return_button.GetPosition()[1] + return_button.GetSize()[1] + 40))
+        back_btn = wx.Button(step, label=gui_strings.NAV["return_main"], size=(170, 30))
+        back_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        back_btn.Bind(wx.EVT_BUTTON, lambda event: self.app.go_home())
+        outer.Add(back_btn, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 16)
 
-        # Show dialog
-        dialog.ShowWindowModal()
-        self.dialog = dialog
+        step.SetSizer(outer)
+        self._set_step(step)
 
-
-    def _install_oc_process(self, partition: dict) -> None:
-        """
-        Install OpenCore to disk
-        """
-        self.dialog.Close()
-
-        # Create dialog
-        dialog = wx.Dialog(
+    def _run_install(self, partition: str) -> None:
+        log_panel = gui_support.LogOutputPanel(
             self,
-            title=f"Installing OpenCore to {partition}",
-            style=wx.CAPTION | wx.CLOSE_BOX,
-            size=(370, 200)
+            title=gui_strings.INSTALL_OC["installing_title"].format(partition=partition),
+            on_back=self.app.go_home,
         )
+        self._set_step(log_panel)
+        self.result = False
 
-        # Add text: "Installing OpenCore to {partition}"
-        text_label = wx.StaticText(dialog, label=f"Installing OpenCore to {partition}", pos=(-1, 10))
-        text_label.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        text_label.Centre(wx.HORIZONTAL)
+        self.app.set_busy(True, "installing OpenCore")
+        try:
+            def _worker():
+                logging.info(f"Installing OpenCore to {partition}")
+                with gui_support.capture_logs(log_panel.text_box):
+                    try:
+                        self.result = install.disk_installation(self.constants).install_opencore(partition)
+                    except Exception:
+                        logging.error("An internal error occurred while installing:\n")
+                        logging.error(traceback.format_exc())
 
-        # Read-only text box: {empty}
-        text_box = wx.TextCtrl(dialog, value="", pos=(-1, text_label.GetPosition()[1] + text_label.GetSize()[1] + 10), size=(350, 200), style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_RICH2)
-        text_box.Centre(wx.HORIZONTAL)
-        self.text_box = text_box
+            thread = threading.Thread(target=_worker)
+            thread.start()
+            gui_support.wait_for_thread(thread)
+        finally:
+            self.app.set_busy(False)
 
-        # Add button: Return to main menu
-        return_button = wx.Button(dialog, label="Return to Main Menu", size=(150,30), pos=(-1, text_box.GetPosition()[1] + text_box.GetSize()[1] + 10))
-        return_button.Centre(wx.HORIZONTAL)
-        return_button.Bind(wx.EVT_BUTTON, self.on_return_to_main_menu)
-        return_button.Disable()
-
-        # Set size
-        dialog.SetSize((370, return_button.GetPosition()[1] + return_button.GetSize()[1] + 40))
-
-        # Show dialog
-        dialog.ShowWindowModal()
-        self.dialog = dialog
-
-        # Install OpenCore
-        self._invoke_install_oc(partition)
-        return_button.Enable()
-
-
-    def _invoke_install_oc(self, partition: dict) -> None:
-        """
-        Invoke OpenCore installation
-        """
-        thread = threading.Thread(target=self._install_oc, args=(partition,))
-        thread.start()
-
-        gui_support.wait_for_thread(thread)
+        log_panel.finish()
 
         if self.result is True:
             if self.constants.update_stage != gui_support.AutoUpdateStages.INACTIVE and self.constants.detected_os >= os_data.os_data.big_sur:
                 self.constants.update_stage = gui_support.AutoUpdateStages.UNPATCHING
-                popup_message = wx.MessageDialog(
-                    self,
-                    f"OpenCore has finished installing to disk.\n\nWould you like to update your root patches next? This will require a few reboots.", "Success",
-                    wx.YES_NO | wx.YES_DEFAULT
+                dlg = wx.MessageDialog(
+                    self.app,
+                    gui_strings.INSTALL_OC["update_patches_msg"],
+                    "Success",
+                    wx.YES_NO | wx.YES_DEFAULT,
                 )
-                popup_message.ShowModal()
-                if popup_message.GetReturnCode() == wx.ID_YES:
-                    self.Hide()
-                    gui_sys_patch_display.SysPatchDisplayFrame(
-                        parent=None,
-                        title=self.title,
-                        global_constants=self.constants,
-                        screen_location=self.GetPosition()
-                    )
-                    popup_message.ShowModal()
-                    self.Destroy()
+                if dlg.ShowModal() == wx.ID_YES:
+                    self.app.navigate("sys_patch_display")
                 return
 
-            elif not self.constants.custom_model:
-                gui_support.RestartHost(self).restart(message="OpenCore has finished installing to disk.\n\nYou will need to reboot and hold the Option key and select OpenCore/Boot EFI's option.\n\nWould you like to reboot?")
+            if not self.constants.custom_model:
+                gui_support.RestartHost(self.app).restart(message=gui_strings.INSTALL_OC["reboot_msg"])
             else:
-                popup_message = wx.MessageDialog(
-                    self,
-                    f"OpenCore has finished installing to disk.\n\nYou can eject the drive, insert it into the {self.constants.custom_model}, reboot, hold the Option key and select OpenCore/Boot EFI's option.", "Success",
-                    wx.OK
-                )
-                popup_message.ShowModal()
-        else:
-            if self.constants.update_stage != gui_support.AutoUpdateStages.INACTIVE:
-                self.constants.update_stage = gui_support.AutoUpdateStages.FINISHED
-
-
-    def _install_oc(self, partition: dict) -> None:
-        """
-        Install OpenCore to disk
-        """
-        logging.info(f"Installing OpenCore to {partition}")
-
-        logger = logging.getLogger()
-        logger.addHandler(gui_support.ThreadHandler(self.text_box))
-        try:
-            self.result = install.disk_installation(self.constants).install_opencore(partition)
-        except:
-            logging.error("An internal error occurred while installing:\n")
-            logging.error(traceback.format_exc())
-        logger.removeHandler(logger.handlers[2])
-
-
-    def on_reload_frame(self, event: wx.Event = None) -> None:
-        """
-        Reload frame
-        """
-        self.Destroy()
-        frame = InstallOCFrame(
-            None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetScreenPosition()
-        )
-        frame.Show()
-
-
-    def on_return_to_main_menu(self, event: wx.Event = None) -> None:
-        """
-        Return to main menu
-        """
-        main_menu_frame = gui_main_menu.MainFrame(
-            None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetScreenPosition()
-        )
-        main_menu_frame.Show()
-        self.Destroy()
-
-
-
-
+                wx.MessageDialog(
+                    self.app,
+                    gui_strings.INSTALL_OC["eject_msg"].format(model=self.constants.custom_model),
+                    "Success",
+                    wx.OK,
+                ).ShowModal()
+        elif self.constants.update_stage != gui_support.AutoUpdateStages.INACTIVE:
+            self.constants.update_stage = gui_support.AutoUpdateStages.FINISHED

@@ -1,5 +1,5 @@
 """
-gui_settings.py: Settings Frame for the GUI
+gui_settings.py: Declarative, scrollable Settings Panel for OpenCore Legacy Patcher
 """
 
 import wx
@@ -12,32 +12,26 @@ import subprocess
 from pathlib import Path
 
 from .. import constants
-
 from ..sys_patch import sys_patch
-
-from ..wx_gui import (
-    gui_support,
-    gui_update
-)
+from ..wx_gui import gui_support, gui_strings
 from ..support import (
     global_settings,
     defaults,
     generate_smbios,
     network_handler,
-    subprocess_wrapper
 )
 from ..datasets import (
     model_array,
     sip_data,
     smbios_data,
     os_data,
-    cpu_data
+    cpu_data,
 )
 
 
-class SettingsFrame(wx.Frame):
+class SettingsPanel(wx.Panel):
     """
-    Modal-based Settings Frame
+    Category-based scrollable Settings Panel routed inside the single main window
     """
 
     _APP_ONLY_SETTINGS = frozenset({
@@ -64,810 +58,620 @@ class SettingsFrame(wx.Frame):
         "allow_nvme_fixing", "apfs_trim_timeout", "custom_sip_value",
     )
 
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None, oc_settings_changed: bool = False):
-        logging.info("Initializing Settings Frame")
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
-        self.parent: wx.Frame = parent
-        self.oc_settings_changed: bool = oc_settings_changed
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants, oc_settings_changed: bool = False) -> None:
+        super().__init__(parent)
+        logging.info("Initializing Settings Panel")
+        self.app = app
+        self.constants = global_constants
+        self.oc_settings_changed = oc_settings_changed
+        self.hyperlink_colour = wx.Colour(25, 179, 231)
 
-        self.hyperlink_colour = (25, 179, 231)
+        self.categories: list[str] = []
+        self.category_pages: dict[str, wx.ScrolledWindow] = {}
+        self.settings: dict = {}
 
-        self.settings = self._settings()
+        self._build_ui()
 
-        self.frame_modal = wx.Dialog(parent, title=title, size=(600, 685))
+    def _build_ui(self) -> None:
+        outer = wx.BoxSizer(wx.VERTICAL)
+        self.header = gui_support.PageHeader(
+            self,
+            gui_strings.SETTINGS["title"],
+            back_label=gui_strings.NAV["return_main"],
+            on_back=self.on_return,
+        )
+        outer.Add(self.header, 0, wx.EXPAND)
 
-        self._generate_elements(self.frame_modal)
-        self.frame_modal.ShowWindowModal()
+        # Target Model bar
+        model_bar = wx.BoxSizer(wx.HORIZONTAL)
+        model_lbl = wx.StaticText(self, label=f"{gui_strings.SETTINGS['target_model']}:")
+        model_lbl.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+        model_bar.Add(model_lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
 
-    def _generate_elements(self, frame: wx.Frame = None) -> None:
-        """
-        Generates elements for the Settings Frame
-        Uses wx.Notebook to implement a tabbed interface
-        and relies on 'self._settings()' for populating
-        """
-
-        notebook = wx.Notebook(frame)
-        notebook.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.AddSpacer(10)
-
-        model_label = wx.StaticText(frame, label="Target Model", pos=(-1, -1))
-        model_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-        sizer.Add(model_label, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-
-        model_choice = wx.Choice(frame, choices=model_array.SupportedSMBIOS + ["Host Model"], pos=(-1, -1), size=(150, -1))
-        model_choice.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        model_choice.Bind(wx.EVT_CHOICE, lambda event: self.on_model_choice(event, model_choice))
+        self.model_choice = wx.Choice(self, choices=model_array.SupportedSMBIOS + ["Host Model"], size=(160, -1))
+        self.model_choice.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
         selection = self.constants.custom_model if self.constants.custom_model else "Host Model"
-        model_choice.SetSelection(model_choice.FindString(selection))
-        sizer.Add(model_choice, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+        self.model_choice.SetSelection(self.model_choice.FindString(selection))
+        self.model_choice.Bind(wx.EVT_CHOICE, self.on_model_choice)
+        model_bar.Add(self.model_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
 
-        model_description = wx.StaticText(frame, label="Overrides Mac Model the Patcher will build for.", pos=(-1, -1))
-        model_description.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
-        sizer.Add(model_description, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+        model_desc = wx.StaticText(self, label=gui_strings.SETTINGS["target_model_desc"])
+        model_desc.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
+        model_desc.SetForegroundColour(wx.Colour(128, 128, 128))
+        model_bar.Add(model_desc, 1, wx.ALIGN_CENTER_VERTICAL)
 
-        tabs = list(self.settings.keys())
-        if not Path("~/.dortania_developer").expanduser().exists():
-            tabs.remove("Developer")
-        for tab in tabs:
-            panel = wx.Panel(notebook)
-            notebook.AddPage(panel, tab)
+        outer.Add(model_bar, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        outer.AddSpacer(8)
 
-        sizer.Add(notebook, 1, wx.EXPAND | wx.ALL, 10)
+        # Sidebar + right ScrolledWindow container
+        split = wx.BoxSizer(wx.HORIZONTAL)
+        self.sidebar = wx.ListBox(self, style=wx.LB_SINGLE, size=(155, -1))
+        self.sidebar.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        self.sidebar.Bind(wx.EVT_LISTBOX, self._on_category_select)
+        split.Add(self.sidebar, 0, wx.EXPAND | wx.RIGHT, 10)
 
-        button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.book = wx.Simplebook(self)
+        split.Add(self.book, 1, wx.EXPAND)
+        outer.Add(split, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 16)
 
-        reset_button = wx.Button(frame, label="Reset Settings", pos=(-1, -1), size=(130, 30))
-        reset_button.Bind(wx.EVT_BUTTON, self.on_reset_settings)
-        reset_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        button_sizer.Add(reset_button, 0, wx.ALL, 5)
+        # Footer action bar
+        footer = wx.BoxSizer(wx.HORIZONTAL)
+        reset_btn = wx.Button(self, label=gui_strings.SETTINGS["reset_btn"], size=(135, 30))
+        reset_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        reset_btn.Bind(wx.EVT_BUTTON, self.on_reset_settings)
+        footer.Add(reset_btn, 0, wx.RIGHT, 8)
 
-        self.rebuild_button = wx.Button(frame, label="Rebuild OpenCore", pos=(-1, -1), size=(150, 30))
-        self.rebuild_button.Bind(wx.EVT_BUTTON, self.on_rebuild_opencore)
+        self.rebuild_button = wx.Button(self, label=gui_strings.SETTINGS["rebuild_btn"], size=(155, 30))
         self.rebuild_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        self.rebuild_button.Bind(wx.EVT_BUTTON, self.on_rebuild_opencore)
         self.rebuild_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
-        button_sizer.Add(self.rebuild_button, 0, wx.ALL, 5)
+        footer.Add(self.rebuild_button, 0, wx.RIGHT, 8)
 
-        return_button = wx.Button(frame, label="Return", pos=(-1, -1), size=(100, 30))
-        return_button.Bind(wx.EVT_BUTTON, self.on_return)
-        return_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        button_sizer.Add(return_button, 0, wx.ALL, 5)
+        return_btn = wx.Button(self, label=gui_strings.NAV["return_main"], size=(165, 30))
+        return_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        return_btn.Bind(wx.EVT_BUTTON, self.on_return)
+        footer.Add(return_btn, 0)
 
-        sizer.Add(button_sizer, 0, wx.ALIGN_CENTER | wx.BOTTOM | wx.TOP, 8)
+        outer.Add(footer, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP | wx.BOTTOM, 12)
+        self.SetSizer(outer)
+        self._reload_categories()
 
-        frame.SetSizer(sizer)
+    def _reload_categories(self, preserve_category: str = None) -> None:
+        self.settings = self._settings_schema()
+        tabs = list(self.settings.keys())
+        if not Path("~/.dortania_developer").expanduser().exists() and "Developer" in tabs:
+            tabs.remove("Developer")
 
-        horizontal_center = frame.GetSize()[0] / 2
+        self.book.DeleteAllPages()
+        self.sidebar.Clear()
+        self.category_pages.clear()
+        self.categories = tabs
+
         for tab in tabs:
-            if tab not in self.settings:
+            self.sidebar.Append(tab)
+            page = self._build_category_page(tab, self.settings[tab])
+            self.category_pages[tab] = page
+            self.book.AddPage(page, tab)
+
+        idx = tabs.index(preserve_category) if preserve_category in tabs else 0
+        self.sidebar.SetSelection(idx)
+        self.book.SetSelection(idx)
+        self.Layout()
+
+    def _on_category_select(self, event: wx.Event) -> None:
+        idx = self.sidebar.GetSelection()
+        if idx != wx.NOT_FOUND:
+            self.book.SetSelection(idx)
+
+    def _build_category_page(self, category: str, entries: dict) -> wx.ScrolledWindow:
+        page = wx.ScrolledWindow(self.book, style=wx.VSCROLL)
+        page.SetScrollRate(0, 16)
+        col = wx.BoxSizer(wx.VERTICAL)
+
+        for label, info in entries.items():
+            kind = info["type"]
+            enabled = info.get("condition", True)
+
+            if kind == "title":
+                hdr = wx.StaticText(page, label=label)
+                hdr.SetFont(gui_support.font_factory(15, wx.FONTWEIGHT_BOLD))
+                col.Add(hdr, 0, wx.TOP | wx.BOTTOM, 6)
+                col.Add(wx.StaticLine(page), 0, wx.EXPAND | wx.BOTTOM, 8)
                 continue
 
-            stock_height = 0
-            stock_width = 20
+            if kind == "custom":
+                info["builder"](page, col)
+                col.AddSpacer(8)
+                continue
 
-            height = stock_height
-            width = stock_width
+            if kind == "checkbox":
+                cb = wx.CheckBox(page, label=label)
+                cb.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+                cb.SetValue(bool(info.get("value", False)) if enabled else False)
+                cb.Enable(enabled)
+                cb.Bind(wx.EVT_CHECKBOX, lambda evt, cat=category, key=label: self._on_checkbox(evt, cat, key))
+                col.Add(cb, 0, wx.BOTTOM, 2)
 
-            lowest_height_reached = height
-            highest_height_reached = height
+            elif kind == "spinctrl":
+                row = wx.BoxSizer(wx.HORIZONTAL)
+                spin = wx.SpinCtrl(page, value=str(info["value"]), min=info["min"], max=info["max"], size=(58, -1))
+                spin.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+                spin.Bind(wx.EVT_TEXT, lambda evt, key=label, cat=category: self._on_spinctrl(evt, cat, key))
+                row.Add(spin, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+                lbl = wx.StaticText(page, label=label)
+                lbl.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+                row.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL)
+                col.Add(row, 0, wx.BOTTOM, 2)
 
-            panel = notebook.GetPage(tabs.index(tab))
+            elif kind == "choice":
+                lbl = wx.StaticText(page, label=label)
+                lbl.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
+                col.Add(lbl, 0, wx.BOTTOM, 4)
 
-            for setting, setting_info in self.settings[tab].items():
-                if setting_info["type"] == "populate":
-                    # execute populate function
-                    if setting_info["args"] == wx.Frame:
-                        setting_info["function"](panel)
-                    else:
-                        raise Exception("Invalid populate function")
-                    continue
-
-                if setting_info["type"] == "title":
-                    stock_height = lowest_height_reached
-                    height = stock_height
-                    width = stock_width
-
-                    height += 10
-
-                    # Add title
-                    title = wx.StaticText(panel, label=setting, pos=(-1, -1))
-                    title.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-
-                    title.SetPosition((int(horizontal_center) - int(title.GetSize()[0] / 2) - 15, height))
-                    highest_height_reached = height + title.GetSize()[1] + 10
-                    height += title.GetSize()[1] + 10
-                    continue
-
-                if setting_info["type"] == "sub_title":
-                    # Add sub-title
-                    sub_title = wx.StaticText(panel, label=setting, pos=(-1, -1))
-                    sub_title.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-
-                    sub_title.SetPosition((int(horizontal_center) - int(sub_title.GetSize()[0] / 2) - 15, height))
-                    highest_height_reached = height + sub_title.GetSize()[1] + 10
-                    height += sub_title.GetSize()[1] + 10
-                    continue
-
-                if setting_info["type"] == "wrap_around":
-                    height = highest_height_reached
-                    width = 300 if width is stock_width else stock_width
-                    continue
-
-                if setting_info["type"] == "checkbox":
-                    # Add checkbox, and description underneath
-                    checkbox = wx.CheckBox(panel, label=setting, pos=(10 + width, 10 + height), size = (300,-1))
-
-                    value = False
-                    if "value" in setting_info:
-                        try:
-                            value = bool(setting_info["value"])
-                        except ValueError:
-                            logging.error(f"Invalid value for {setting}, got {setting_info['value']} (type: {type(setting_info['value'])})")
-                            value = False
-
-                    checkbox.SetValue(value)
-                    checkbox.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-                    event = lambda event, warning=setting_info["warning"] if "warning" in setting_info else "", override=bool(setting_info["override_function"]) if "override_function" in setting_info else False: self.on_checkbox(event, warning, override)
-                    checkbox.Bind(wx.EVT_CHECKBOX, event)
-                    if "condition" in setting_info:
-                        checkbox.Enable(setting_info["condition"])
-                        if setting_info["condition"] is False:
-                            checkbox.SetValue(False)
-
-                elif setting_info["type"] == "spinctrl":
-                    # Add spinctrl, and description underneath
-                    spinctrl = wx.SpinCtrl(panel, value=str(setting_info["value"]), pos=(width - 20, 10 + height), min=setting_info["min"], max=setting_info["max"], size = (45,-1))
-                    spinctrl.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-                    spinctrl.Bind(wx.EVT_TEXT, lambda event, variable=setting: self.on_spinctrl(event, variable))
-                    # Add label next to spinctrl
-                    label = wx.StaticText(panel, label=setting, pos=(spinctrl.GetSize()[0] + width - 16, spinctrl.GetPosition()[1]))
-                    label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-                elif setting_info["type"] == "choice":
-                    # Title
-                    title = wx.StaticText(panel, label=setting, pos=(width + 30, 10 + height))
-                    title.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-                    height += title.GetSize()[1] + 10
-
-                    # Add combobox, and description underneath
-                    choice = wx.Choice(panel, pos=(width + 25, 10 + height), choices=setting_info["choices"], size = (150,-1))
-                    choice.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-                    choice.SetSelection(choice.FindString(setting_info["value"]))
-                    if "override_function" in setting_info:
-                        choice.Bind(wx.EVT_CHOICE, lambda event, variable=setting: self.settings[tab][variable]["override_function"](event))
-                    else:
-                        choice.Bind(wx.EVT_CHOICE, lambda event, variable=setting: self.on_choice(event, variable))
-                    height += 10
-                elif setting_info["type"] == "button":
-                    button = wx.Button(panel, label=setting, pos=(width + 25, 10 + height), size = (200,-1))
-                    button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-                    button.Bind(wx.EVT_BUTTON, lambda event, variable=setting: self.settings[tab][variable]["function"](event))
-                    height += 10
-
+                choice = wx.Choice(page, choices=info["choices"], size=(190, -1))
+                choice.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                sel = choice.FindString(info["value"])
+                if sel != wx.NOT_FOUND:
+                    choice.SetSelection(sel)
+                choice.Enable(enabled)
+                if "override_function" in info:
+                    choice.Bind(wx.EVT_CHOICE, info["override_function"])
                 else:
-                    raise Exception("Invalid setting type")
+                    choice.Bind(wx.EVT_CHOICE, lambda evt, key=label, cat=category: self._on_choice(evt, cat, key))
+                col.Add(choice, 0, wx.LEFT | wx.BOTTOM, 4)
 
-                lines = '\n'.join(setting_info["description"])
-                description = wx.StaticText(panel, label=lines, pos=(30 + width, 10 + height + 20))
-                description.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
-                height += 40
-                if "condition" in setting_info:
-                    if setting_info["condition"] is False:
-                        description.SetForegroundColour((128, 128, 128))
+            elif kind == "button":
+                btn = wx.Button(page, label=label, size=(220, 30))
+                btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                btn.Bind(wx.EVT_BUTTON, info["function"])
+                col.Add(btn, 0, wx.BOTTOM, 4)
 
-                # Check number of lines in description, and adjust spacer accordingly
-                for i, line in enumerate(lines.split('\n')):
-                    if line == "":
-                        continue
-                    if i == 0:
-                        height += 11
-                    else:
-                        height += 13
+            desc_lines = [line for line in info.get("description", []) if line]
+            if desc_lines:
+                desc = wx.StaticText(page, label=" ".join(desc_lines))
+                desc.SetFont(gui_support.font_factory(11, wx.FONTWEIGHT_NORMAL))
+                if not enabled:
+                    desc.SetForegroundColour(wx.Colour(128, 128, 128))
+                desc.Wrap(415)
+                col.Add(desc, 0, wx.LEFT | wx.BOTTOM, 10)
+            else:
+                col.AddSpacer(6)
 
-                if height > lowest_height_reached:
-                    lowest_height_reached = height
+        page.SetSizer(col)
+        page.FitInside()
+        return page
 
+    @staticmethod
+    def _read_prop(key: str, default):
+        val = global_settings.GlobalEnviromentSettings().read_property(key)
+        return default if val is None else val
 
-    def _settings(self) -> dict:
-        """
-        Generates a dictionary of settings to be used in the GUI
-        General format:
-        {
-            "Tab Name": {
-                "type": "title" | "checkbox" | "spinctrl" | "populate" | "wrap_around",
-                "value": bool | int | str,
-                "variable": str,  (Variable name)
-                "constants_variable": str, (Constants variable name, if different from "variable")
-                "description": [str, str, str], (List of strings)
-                "warning": str, (Optional) (Warning message to be displayed when checkbox is checked)
-                "override_function": function, (Optional) (Function to be executed when checkbox is checked)
-            }
-        }
-        """
+    def _fu_value_label(self) -> str:
+        if self.constants.fu_status is False:
+            return "Disabled"
+        if self.constants.fu_arguments is None or self.constants.fu_arguments == "":
+            return "Enabled"
+        return "Partial"
 
-        models = [model for model in smbios_data.smbios_dictionary if "_" not in model and " " not in model and smbios_data.smbios_dictionary[model]["Board ID"] is not None]
+    def _settings_schema(self) -> dict:
+        models = [m for m in smbios_data.smbios_dictionary if "_" not in m and " " not in m and smbios_data.smbios_dictionary[m]["Board ID"] is not None]
         socketed_imac_models = ["iMac9,1", "iMac10,1", "iMac11,1", "iMac11,2", "iMac11,3", "iMac12,1", "iMac12,2"]
         socketed_gpu_models = socketed_imac_models + ["MacPro3,1", "MacPro4,1", "MacPro5,1", "Xserve2,1", "Xserve3,1"]
+        target_model = self.constants.custom_model or self.constants.computer.real_model
 
-        settings = {
-            "Build": {
-                "General": {
-                    "type": "title",
-                },
-                "FireWire Booting": {
+        return {
+            "App & Updates": {
+                "General": {"type": "title"},
+                "Allow native models": {
                     "type": "checkbox",
-                    "value": self.constants.firewire_boot,
-                    "variable": "firewire_boot",
-                    "description": [
-                        "Enable booting macOS from",
-                        "FireWire drives.",
-                    ],
-                    "condition": not (generate_smbios.check_firewire(self.constants.custom_model or self.constants.computer.real_model) is False)
+                    "value": self.constants.allow_oc_everywhere,
+                    "variable": "allow_oc_everywhere",
+                    "description": ["Allow OpenCore to be installed on natively supported Macs."],
+                    "warning": (
+                        "This option should only be used if your Mac natively supports the OSes you wish to run.\n\n"
+                        "If running an unsupported OS, this option will break booting. Only toggle for enabling features on a native Mac.\n\n"
+                        "Are you certain you want to continue?"
+                    ),
                 },
-                "XHCI Booting": {
+                "Ignore App Updates": {
                     "type": "checkbox",
-                    "value": self.constants.xhci_boot,
-                    "variable": "xhci_boot",
-                    "description": [
-                        "Enable booting macOS from add-in",
-                        "USB 3.0 expansion cards on systems",
-                        "without native support.",
-                    ],
-                    "condition": not gui_support.CheckProperties(self.constants).host_has_cpu_gen(cpu_data.CPUGen.ivy_bridge) # Sandy Bridge and older do not natively support XHCI booting
+                    "value": self._read_prop("IgnoreAppUpdates", self.constants.ignore_updates),
+                    "variable": "IgnoreAppUpdates",
+                    "constants_variable": "ignore_updates",
+                    "description": ["Suppress automatic checks for OpenCore Legacy Patcher updates."],
+                    "override_function": self._update_global_settings,
                 },
-                "NVMe Booting": {
+                "Disable Reporting": {
                     "type": "checkbox",
-                    "value": self.constants.nvme_boot,
-                    "variable": "nvme_boot",
-                    "description": [
-                        "Enable booting macOS from NVMe",
-                        "drives on systems without native",
-                        "support.",
-                        "Note: Requires Firmware support",
-                        "for OpenCore to load from NVMe.",
-                    ],
-                    "condition": not gui_support.CheckProperties(self.constants).host_has_cpu_gen(cpu_data.CPUGen.ivy_bridge) # Sandy Bridge and older do not natively support NVMe booting
+                    "value": self._read_prop("DisableCrashAndAnalyticsReporting", False),
+                    "variable": "DisableCrashAndAnalyticsReporting",
+                    "description": ["Prevent sending crash and analytics reports to Dortania."],
+                    "override_function": self._update_global_settings,
                 },
-                "wrap_around 2": {
-                    "type": "wrap_around",
-                },
-                "OpenCore Vaulting": {
+                "Remove Unused KDKs": {
                     "type": "checkbox",
-                    "value": self.constants.vault,
-                    "variable": "vault",
-                    "description": [
-                        "Digitally sign OpenCore to prevent",
-                        "tampering or corruption."
-                    ],
+                    "value": self._read_prop("ShouldNukeKDKs", self.constants.should_nuke_kdks),
+                    "variable": "ShouldNukeKDKs",
+                    "constants_variable": "should_nuke_kdks",
+                    "description": ["Remove unused Kernel Debug Kits during root patching."],
+                    "override_function": self._update_global_settings,
                 },
-
+                "Statistics": {"type": "title"},
+                "Populate Stats": {"type": "custom", "builder": self._build_app_stats},
+            },
+            "Boot & OpenCore": {
+                "Boot Options": {"type": "title"},
                 "Show OpenCore Boot Picker": {
                     "type": "checkbox",
                     "value": self.constants.showpicker,
                     "variable": "showpicker",
-                    "description": [
-                        "When disabled, users can hold ESC to",
-                        "show picker in the firmware.",
-                    ],
+                    "description": ["When disabled, hold ESC in firmware to show the boot picker."],
                 },
                 "Boot Picker Timeout": {
                     "type": "spinctrl",
                     "value": self.constants.oc_timeout,
                     "variable": "oc_timeout",
-                    "description": [
-                        "Timeout before boot picker selects default",
-                        "entry in seconds.",
-                        "Set to 0 for no timeout.",
-                    ],
-
+                    "description": ["Seconds before selecting default entry (0 for no timeout)."],
                     "min": 0,
                     "max": 60,
                 },
-                "Debug": {
-                    "type": "title",
+                "OpenCore Vaulting": {
+                    "type": "checkbox",
+                    "value": self.constants.vault,
+                    "variable": "vault",
+                    "description": ["Digitally sign OpenCore to prevent tampering or corruption."],
                 },
-
+                "FireWire Booting": {
+                    "type": "checkbox",
+                    "value": self.constants.firewire_boot,
+                    "variable": "firewire_boot",
+                    "description": ["Enable booting macOS from FireWire drives."],
+                    "condition": not (generate_smbios.check_firewire(target_model) is False),
+                },
+                "XHCI Booting": {
+                    "type": "checkbox",
+                    "value": self.constants.xhci_boot,
+                    "variable": "xhci_boot",
+                    "description": ["Enable booting from add-in USB 3.0 expansion cards on older systems."],
+                    "condition": not gui_support.CheckProperties(self.constants).host_has_cpu_gen(cpu_data.CPUGen.ivy_bridge),
+                },
+                "NVMe Booting": {
+                    "type": "checkbox",
+                    "value": self.constants.nvme_boot,
+                    "variable": "nvme_boot",
+                    "description": ["Enable booting from NVMe drives on systems without native firmware support."],
+                    "condition": not gui_support.CheckProperties(self.constants).host_has_cpu_gen(cpu_data.CPUGen.ivy_bridge),
+                },
+                "Debug": {"type": "title"},
                 "Verbose": {
                     "type": "checkbox",
                     "value": self.constants.verbose_debug,
                     "variable": "verbose_debug",
-                    "description": [
-                        "Verbose output during boot.",
-                    ],
-
+                    "description": ["Enable verbose kernel output during boot (-v)."],
                 },
                 "Kext Debugging": {
                     "type": "checkbox",
                     "value": self.constants.kext_debug,
                     "variable": "kext_debug",
-                    "description": [
-                        "Use DEBUG variants of kexts and",
-                        "enables additional kernel logging.",
-                    ],
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
+                    "description": ["Use DEBUG kext variants and enable additional kernel logging."],
                 },
                 "OpenCore Debugging": {
                     "type": "checkbox",
                     "value": self.constants.opencore_debug,
                     "variable": "opencore_debug",
-                    "description": [
-                        "Use DEBUG variant of OpenCore",
-                        "and enables additional logging.",
-                    ],
+                    "description": ["Use DEBUG OpenCore binary and enable additional OpenCore logging."],
                 },
             },
-            "Extras": {
-                "General (Continued)": {
-                    "type": "title",
-                },
-                "Wake on WLAN": {
-                    "type": "checkbox",
-                    "value": self.constants.enable_wake_on_wlan,
-                    "variable": "enable_wake_on_wlan",
-                    "description": [
-                        "Disabled by default due to",
-                        "performance degradation",
-                        "on some systems from wake.",
-                        "Only applies to BCM943224, 331,",
-                        "360 and 3602 chipsets.",
-                    ],
-                },
-                "Disable Thunderbolt": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_tb,
-                    "variable": "disable_tb",
-                    "description": [
-                        "For MacBookPro11,x with faulty",
-                        "PCHs that may crash sporadically.",
-                    ],
-                    "condition": (self.constants.custom_model and self.constants.custom_model in ["MacBookPro11,1", "MacBookPro11,2", "MacBookPro11,3"]) or self.constants.computer.real_model in ["MacBookPro11,1", "MacBookPro11,2", "MacBookPro11,3"]
-                },
-                "Windows GMUX": {
-                    "type": "checkbox",
-                    "value": self.constants.dGPU_switch,
-                    "variable": "dGPU_switch",
-                    "description": [
-                        "Allow iGPU to be exposed in Windows",
-                        "for dGPU-based MacBooks.",
-                    ],
-                },
-                "Disable CPUFriend": {
-                    "type": "checkbox",
-                    "value": self.constants.disallow_cpufriend,
-                    "variable": "disallow_cpufriend",
-                    "description": [
-                        "Disables power management helper",
-                        "for unsupported models.",
-                    ],
-                },
-                "Disable mediaanalysisd service": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_mediaanalysisd,
-                    "variable": "disable_mediaanalysisd",
-                    "description": [
-                        "For systems that are the primary iCloud",
-                        "Photo Library host with a 3802-based GPU,",
-                        "this may aid in prolonged idle stability.",
-                    ],
-                    "condition": gui_support.CheckProperties(self.constants).host_has_3802_gpu()
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
-                },
-                "Allow AppleALC Audio": {
-                    "type": "checkbox",
-                    "value": self.constants.set_alc_usage,
-                    "variable": "set_alc_usage",
-                    "description": [
-                        "Allow AppleALC to manage audio",
-                        "if applicable.",
-                        "Only disable if your host lacks",
-                        "a GOP ROM.",
-                    ],
-                },
-                "NVRAM WriteFlash": {
-                    "type": "checkbox",
-                    "value": self.constants.nvram_write,
-                    "variable": "nvram_write",
-                    "description": [
-                        "Allow OpenCore to write to NVRAM.",
-                        "Disable on systems with faulty or",
-                        "degraded NVRAM.",
-                    ],
-                },
-
-                "3rd Party NVMe PM": {
-                    "type": "checkbox",
-                    "value": self.constants.allow_nvme_fixing,
-                    "variable": "allow_nvme_fixing",
-                    "description": [
-                        "Enable non-stock NVMe power",
-                        "management in macOS.",
-                    ],
-                },
-                "3rd Party SATA PM": {
-                    "type": "checkbox",
-                    "value": self.constants.allow_3rd_party_drives,
-                    "variable": "allow_3rd_party_drives",
-                    "description": [
-                        "Enable non-stock SATA power",
-                        "management in macOS.",
-                    ],
-                    "condition": not bool(self.constants.computer.third_party_sata_ssd is False and not self.constants.custom_model)
-                },
-                "APFS Trim": {
-                    "type": "checkbox",
-                    "value": self.constants.apfs_trim_timeout,
-                    "variable": "apfs_trim_timeout",
-                    "description": [
-                        "Recommended for all users, however faulty",
-                        "SSDs may benefit from disabling this.",
-                    ],
-                },
-            },
-            "Advanced": {
-                "Miscellaneous": {
-                    "type": "title",
-                },
-                "Disable Firmware Throttling": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_fw_throttle,
-                    "variable": "disable_fw_throttle",
-                    "description": [
-                        "Disables firmware-based throttling",
-                        "caused by missing hardware.",
-                        "Ex. Missing Display, Battery, etc.",
-                    ],
-                },
-                "Software DeMUX": {
-                    "type": "checkbox",
-                    "value": self.constants.software_demux,
-                    "variable": "software_demux",
-                    "description": [
-                        "Enable software based DeMUX",
-                        "for MacBookPro8,2 and MacBookPro8,3.",
-                        "Prevents faulty dGPU from turning on.",
-                        "Note: Requires associated NVRAM arg:",
-                        "'gpu-power-prefs'.",
-                    ],
-                    "warning": "This settings requires 'gpu-power-prefs' NVRAM argument to be set to '1'.\n\nIf missing and this option is toggled, the system will not boot\n\nFull command:\nnvram FA4CE28D-B62F-4C99-9CC3-6815686E30F9:gpu-power-prefs=%01%00%00%00",
-                    "condition": not bool((not self.constants.custom_model and self.constants.computer.real_model not in ["MacBookPro8,2", "MacBookPro8,3"]) or (self.constants.custom_model and self.constants.custom_model not in ["MacBookPro8,2", "MacBookPro8,3"]))
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
-                },
-                "FeatureUnlock": {
-                    "type": "choice",
-                    "choices": [
-                        "Enabled",
-                        "Partial",
-                        "Disabled",
-                    ],
-                    "value": "Enabled",
-                    "variable": "",
-                    "description": [
-                        "Configure FeatureUnlock level.",
-                        "Recommend lowering if your system",
-                        "experiences memory instability.",
-                    ],
-                },
-                "Populate FeatureUnlock Override": {
-                    "type": "populate",
-                    "function": self._populate_fu_override,
-                    "args": wx.Frame,
-                },
-                "Hibernation Work-around": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_connectdrivers,
-                    "variable": "disable_connectdrivers",
-                    "description": [
-                        "Only load minimum EFI drivers",
-                        "to prevent hibernation issues.",
-                        "Note: This may break booting from",
-                        "external drives.",
-                    ],
-                },
-                "Graphics": {
-                    "type": "title",
-                },
-                "AMD GOP Injection": {
-                    "type": "checkbox",
-                    "value": self.constants.amd_gop_injection,
-                    "variable": "amd_gop_injection",
-                    "description": [
-                        "Inject AMD GOP for boot screen",
-                        "support on PC GPUs.",
-                    ],
-                    "condition": not bool((not self.constants.custom_model and self.constants.computer.real_model not in socketed_gpu_models) or (self.constants.custom_model and self.constants.custom_model not in socketed_gpu_models))
-                },
-                "Nvidia GOP Injection": {
-                    "type": "checkbox",
-                    "value": self.constants.nvidia_kepler_gop_injection,
-                    "variable": "nvidia_kepler_gop_injection",
-                    "description": [
-                        "Inject Nvidia Kepler GOP for boot",
-                        "screen support on PC GPUs.",
-                    ],
-                    "condition": not bool((not self.constants.custom_model and self.constants.computer.real_model not in socketed_gpu_models) or (self.constants.custom_model and self.constants.custom_model not in socketed_gpu_models))
-                },
-                "wrap_around 2": {
-                    "type": "wrap_around",
-                },
-                "Graphics Override": {
-                    "type": "choice",
-                    "choices": [
-                        "None",
-                        "Nvidia Kepler",
-                        "AMD GCN",
-                        "AMD Polaris",
-                        "AMD Lexa",
-                        "AMD Navi",
-                    ],
-                    "value": "None",
-                    "variable": "",
-                    "description": [
-                        "Override detected/assumed GPU on",
-                        "socketed MXM-based iMacs.",
-                    ],
-                    "condition": bool((not self.constants.custom_model and self.constants.computer.real_model in socketed_imac_models) or (self.constants.custom_model and self.constants.custom_model in socketed_imac_models))
-                },
-                "Populate Graphics Override": {
-                    "type": "populate",
-                    "function": self._populate_graphics_override,
-                    "args": wx.Frame,
-                },
-
-            },
-            "Security": {
-                "Kernel Security": {
-                    "type": "title",
-                },
-                "Disable Library Validation": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_cs_lv,
-                    "variable": "disable_cs_lv",
-                    "description": [
-                        "Required for loading modified",
-                        "system files from root patching.",
-                    ],
-                },
-                "Disable AMFI": {
-                    "type": "checkbox",
-                    "value": self.constants.disable_amfi,
-                    "variable": "disable_amfi",
-                    "description": [
-                        "Extended version of 'Disable",
-                        "Library Validation', required",
-                        "for systems with deeper",
-                        "root patches.",
-                    ],
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
-                },
-                "Secure Boot Model": {
-                    "type": "checkbox",
-                    "value": self.constants.secure_status,
-                    "variable": "secure_status",
-                    "description": [
-                        "Set Apple Secure Boot Model Identifier",
-                        "to matching T2 model if spoofing.",
-                        "Note: Incompatible with Root Patching.",
-                    ],
-                },
-                "System Integrity Protection": {
-                    "type": "title",
-                },
-                "Populate SIP": {
-                    "type": "populate",
-                    "function": self._populate_sip_settings,
-                    "args": wx.Frame,
-                },
-            },
-            "SMBIOS": {
-                "Model Spoofing": {
-                    "type": "title",
-                },
+            "Hardware & SMBIOS": {
+                "Model Spoofing": {"type": "title"},
                 "SMBIOS Spoof Level": {
                     "type": "choice",
-                    "choices": [
-                        "None",
-                        "Minimal",
-                        "Moderate",
-                        "Advanced",
-                    ],
+                    "choices": ["None", "Minimal", "Moderate", "Advanced"],
                     "value": self.constants.serial_settings,
                     "variable": "serial_settings",
-                    "description": [
-                        "Supported Levels:",
-                        "   - None: No spoofing.",
-                        "   - Minimal: Overrides Board ID.",
-                        "   - Moderate: Overrides Model.",
-                        "   - Advanced: Overrides Model and serial.",
-                    ],
+                    "description": ["None: no spoofing; Minimal: Board ID; Moderate: Model; Advanced: Model + serial."],
                 },
-
                 "SMBIOS Spoof Model": {
                     "type": "choice",
                     "choices": models + ["Default"],
                     "value": self.constants.override_smbios,
                     "variable": "override_smbios",
-                    "description": [
-                        "Set Mac Model to spoof to.",
-                    ],
-
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
+                    "description": ["Set Mac model to spoof to."],
                 },
                 "Allow spoofing native Macs": {
                     "type": "checkbox",
                     "value": self.constants.allow_native_spoofs,
                     "variable": "allow_native_spoofs",
-                    "description": [
-                        "Allow OpenCore to spoof natively",
-                        "supported Macs.",
-                        "Primarily used for enabling",
-                        "Universal Control on unsupported Macs",
-                    ],
+                    "description": ["Allow OpenCore to spoof natively supported Macs (e.g. Universal Control)."],
                 },
-                "Serial Spoofing": {
-                    "type": "title",
+                "Serial Spoofing": {"type": "title"},
+                "Populate Serial Spoofing": {"type": "custom", "builder": self._build_serial_spoofing},
+                "Hardware & Storage": {"type": "title"},
+                "NVRAM WriteFlash": {
+                    "type": "checkbox",
+                    "value": self.constants.nvram_write,
+                    "variable": "nvram_write",
+                    "description": ["Allow OpenCore to write to hardware NVRAM."],
                 },
-                "Populate Serial Spoofing": {
-                    "type": "populate",
-                    "function": self._populate_serial_spoofing_settings,
-                    "args": wx.Frame,
+                "Allow AppleALC Audio": {
+                    "type": "checkbox",
+                    "value": self.constants.set_alc_usage,
+                    "variable": "set_alc_usage",
+                    "description": ["Allow AppleALC to manage audio when applicable."],
                 },
-            },
-            "Root Patching": {
-                "Root Volume Patching": {
-                    "type": "title",
+                "3rd Party NVMe PM": {
+                    "type": "checkbox",
+                    "value": self.constants.allow_nvme_fixing,
+                    "variable": "allow_nvme_fixing",
+                    "description": ["Enable non-stock NVMe power management in macOS."],
+                },
+                "3rd Party SATA PM": {
+                    "type": "checkbox",
+                    "value": self.constants.allow_3rd_party_drives,
+                    "variable": "allow_3rd_party_drives",
+                    "description": ["Enable non-stock SATA power management in macOS."],
+                    "condition": not bool(self.constants.computer.third_party_sata_ssd is False and not self.constants.custom_model),
+                },
+                "APFS Trim": {
+                    "type": "checkbox",
+                    "value": self.constants.apfs_trim_timeout,
+                    "variable": "apfs_trim_timeout",
+                    "description": ["Recommended for most SSDs; disable if experiencing faulty SSD timeouts."],
+                },
+                "Wake on WLAN": {
+                    "type": "checkbox",
+                    "value": self.constants.enable_wake_on_wlan,
+                    "variable": "enable_wake_on_wlan",
+                    "description": ["Only applies to BCM943224, 331, 360 and 3602 chipsets."],
+                },
+                "Disable Thunderbolt": {
+                    "type": "checkbox",
+                    "value": self.constants.disable_tb,
+                    "variable": "disable_tb",
+                    "description": ["Workaround for MacBookPro11,x with faulty PCHs."],
+                    "condition": target_model in ["MacBookPro11,1", "MacBookPro11,2", "MacBookPro11,3"],
+                },
+                "Windows GMUX": {
+                    "type": "checkbox",
+                    "value": self.constants.dGPU_switch,
+                    "variable": "dGPU_switch",
+                    "description": ["Expose iGPU in Windows on dual-GPU MacBooks."],
+                },
+                "Disable CPUFriend": {
+                    "type": "checkbox",
+                    "value": self.constants.disallow_cpufriend,
+                    "variable": "disallow_cpufriend",
+                    "description": ["Disable CPU power management helper for unsupported models."],
                 },
                 "TeraScale 2 Acceleration": {
                     "type": "checkbox",
-                    "value": global_settings.GlobalEnviromentSettings().read_property("MacBookPro_TeraScale_2_Accel") or self.constants.allow_ts2_accel,
+                    "value": self._read_prop("MacBookPro_TeraScale_2_Accel", self.constants.allow_ts2_accel),
                     "variable": "MacBookPro_TeraScale_2_Accel",
                     "constants_variable": "allow_ts2_accel",
-                    "description": [
-                        "Enable AMD TeraScale 2 GPU",
-                        "Acceleration on MacBookPro8,2 and",
-                        "MacBookPro8,3.",
-                        "By default this is disabled due to",
-                        "common GPU failures on these models.",
-                    ],
+                    "description": ["Enable AMD TeraScale 2 GPU acceleration on MacBookPro8,2 / 8,3."],
                     "override_function": self._update_global_settings,
-                    "condition": not bool(self.constants.computer.real_model not in ["MacBookPro8,2", "MacBookPro8,3"])
+                    "condition": self.constants.computer.real_model in ["MacBookPro8,2", "MacBookPro8,3"],
                 },
             },
-            "App": {
-                "General": {
-                    "type": "title",
-                },
-                "Allow native models": {
+            "Security": {
+                "Kernel Security": {"type": "title"},
+                "Disable Library Validation": {
                     "type": "checkbox",
-                    "value": self.constants.allow_oc_everywhere,
-                    "variable": "allow_oc_everywhere",
-                    "description": [
-                        "Allow OpenCore to be installed",
-                        "on natively supported Macs.",
-                        "Note this will not allow unsupported",
-                        "macOS versions to be installed on",
-                        "your system.",
-                    ],
-                    "warning": "This option should only be used if your Mac natively supports the OSes you wish to run.\n\nIf you are currently running an unsupported OS, this option will break booting. Only toggle for enabling OS features on a native Mac.\n\nAre you certain you want to continue?",
+                    "value": self.constants.disable_cs_lv,
+                    "variable": "disable_cs_lv",
+                    "description": ["Required for loading modified system files from root patching."],
                 },
-                "Ignore App Updates": {
+                "Disable AMFI": {
                     "type": "checkbox",
-                    "value": global_settings.GlobalEnviromentSettings().read_property("IgnoreAppUpdates") or self.constants.ignore_updates,
-                    "variable": "IgnoreAppUpdates",
-                    "constants_variable": "ignore_updates",
-                    "description": [
-                        # "Ignore app updates",
-                    ],
-                    "override_function": self._update_global_settings,
+                    "value": self.constants.disable_amfi,
+                    "variable": "disable_amfi",
+                    "description": ["Extended bypass required for systems with deeper root patches."],
                 },
-                "wrap_around 1": {
-                    "type": "wrap_around",
-                },
-                "Disable Reporting": {
+                "Secure Boot Model": {
                     "type": "checkbox",
-                    "value": global_settings.GlobalEnviromentSettings().read_property("DisableCrashAndAnalyticsReporting"),
-                    "variable": "DisableCrashAndAnalyticsReporting",
-                    "description": [
-                        "When enabled, patcher will not",
-                        "report any info to Dortania.",
-                    ],
-                    "override_function": self._update_global_settings,
+                    "value": self.constants.secure_status,
+                    "variable": "secure_status",
+                    "description": ["Set Apple Secure Boot Model Identifier (incompatible with Root Patching)."],
                 },
-                "Remove Unused KDKs": {
+                "System Integrity Protection": {"type": "title"},
+                "Populate SIP": {"type": "custom", "builder": self._build_sip_controls},
+            },
+            "Advanced": {
+                "Miscellaneous": {"type": "title"},
+                "FeatureUnlock": {
+                    "type": "choice",
+                    "choices": ["Enabled", "Partial", "Disabled"],
+                    "value": self._fu_value_label(),
+                    "variable": "",
+                    "description": ["Configure FeatureUnlock level (lower if experiencing memory instability)."],
+                    "override_function": self.fu_selection_click,
+                },
+                "Hibernation Work-around": {
                     "type": "checkbox",
-                    "value": global_settings.GlobalEnviromentSettings().read_property("ShouldNukeKDKs") or self.constants.should_nuke_kdks,
-                    "variable": "ShouldNukeKDKs",
-                    "constants_variable": "should_nuke_kdks",
-                    "description": [
-                        "When enabled, the app will remove",
-                        "unused Kernel Debug Kits from the system",
-                        "during root patching.",
-                    ],
-                    "override_function": self._update_global_settings,
+                    "value": self.constants.disable_connectdrivers,
+                    "variable": "disable_connectdrivers",
+                    "description": ["Load minimum EFI drivers to avoid sleep/hibernation issues (may affect external boot)."],
                 },
-                "Statistics": {
-                    "type": "title",
+                "Disable Firmware Throttling": {
+                    "type": "checkbox",
+                    "value": self.constants.disable_fw_throttle,
+                    "variable": "disable_fw_throttle",
+                    "description": ["Disable firmware throttling caused by missing battery/display sensors."],
                 },
-                "Populate Stats": {
-                    "type": "populate",
-                    "function": self._populate_app_stats,
-                    "args": wx.Frame,
+                "Software DeMUX": {
+                    "type": "checkbox",
+                    "value": self.constants.software_demux,
+                    "variable": "software_demux",
+                    "description": ["Software-based DeMUX for MacBookPro8,2 / 8,3 (requires gpu-power-prefs NVRAM arg)."],
+                    "warning": (
+                        "This setting requires 'gpu-power-prefs' NVRAM argument set to '1'.\n\n"
+                        "Without it, the system will fail to boot.\n\n"
+                        "nvram FA4CE28D-B62F-4C99-9CC3-6815686E30F9:gpu-power-prefs=%01%00%00%00"
+                    ),
+                    "condition": target_model in ["MacBookPro8,2", "MacBookPro8,3"],
+                },
+                "Disable mediaanalysisd service": {
+                    "type": "checkbox",
+                    "value": self.constants.disable_mediaanalysisd,
+                    "variable": "disable_mediaanalysisd",
+                    "description": ["Improves prolonged idle stability on 3802-GPU iCloud Photo hosts."],
+                    "condition": gui_support.CheckProperties(self.constants).host_has_3802_gpu(),
+                },
+                "Graphics": {"type": "title"},
+                "AMD GOP Injection": {
+                    "type": "checkbox",
+                    "value": self.constants.amd_gop_injection,
+                    "variable": "amd_gop_injection",
+                    "description": ["Inject AMD GOP for boot screen support on PC GPUs."],
+                    "condition": target_model in socketed_gpu_models,
+                },
+                "Nvidia GOP Injection": {
+                    "type": "checkbox",
+                    "value": self.constants.nvidia_kepler_gop_injection,
+                    "variable": "nvidia_kepler_gop_injection",
+                    "description": ["Inject Nvidia Kepler GOP for boot screen support on PC GPUs."],
+                    "condition": target_model in socketed_gpu_models,
+                },
+                "Graphics Override": {
+                    "type": "choice",
+                    "choices": ["None", "Nvidia Kepler", "AMD GCN", "AMD Polaris", "AMD Lexa", "AMD Navi"],
+                    "value": f"{self.constants.imac_vendor} {self.constants.imac_model}".strip() if self.constants.imac_vendor != "None" else "None",
+                    "variable": "",
+                    "description": ["Override detected/assumed GPU on socketed MXM iMacs."],
+                    "override_function": self.gpu_selection_click,
+                    "condition": target_model in socketed_imac_models,
                 },
             },
             "Developer": {
-                "Validation": {
-                    "type": "title",
-                },
-                "Install latest nightly build 🧪": {
+                "Validation": {"type": "title"},
+                "Install latest nightly build": {
                     "type": "button",
                     "function": self.on_nightly,
-                    "description": [
-                        "If you're already here, I assume you're ok",
-                        "bricking your system 🧱.",
-                        "Check CHANGELOG before blindly updating.",
-                    ],
+                    "description": ["Download and install a branch build (check CHANGELOG first)."],
                 },
                 "Trigger Exception": {
                     "type": "button",
                     "function": self.on_test_exception,
-                    "description": [
-                    ],
-                },
-                "wrap_around 1": {
-                    "type": "wrap_around",
+                    "description": [],
                 },
                 "Export constants": {
                     "type": "button",
                     "function": self.on_export_constants,
-                    "description": [
-                        "Export constants.py values to a txt file.",
-                    ],
+                    "description": ["Export constants.py values to a text file."],
                 },
-
-                "Developer Root Volume Patching": {
-                    "type": "title",
-                },
+                "Developer Root Volume Patching": {"type": "title"},
                 "Mount Root Volume": {
                     "type": "button",
                     "function": self.on_mount_root_vol,
-                    "description": [
-                        "Life's too short to type 'sudo mount -o",
-                        "nobrowse -t apfs /dev/diskXsY",
-                        "/System/Volumes/Update/mnt1' every time.",
-                    ],
-                },
-                "wrap_around 2": {
-                    "type": "wrap_around",
+                    "description": ["Mount APFS root snapshot read/write for manual inspection."],
                 },
                 "Save Root Volume": {
                     "type": "button",
                     "function": self.on_bless_root_vol,
-                    "description": [
-                        "Rebuild kernel cache and bless snapshot 🙏",
-                    ],
+                    "description": ["Rebuild kernel cache and bless APFS root snapshot."],
                 },
             },
         }
 
-        return settings
+    def _build_sip_controls(self, page: wx.Window, col: wx.BoxSizer) -> None:
+        link_row = wx.BoxSizer(wx.HORIZONTAL)
+        lbl = wx.StaticText(page, label="Flip individual bits matching")
+        lbl.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        link_row.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
 
+        csr_link = wx.adv.HyperlinkCtrl(
+            page,
+            wx.ID_ANY,
+            label="XNU's csr.h",
+            url="https://github.com/apple-oss-distributions/xnu/blob/xnu-8020.101.4/bsd/sys/csr.h",
+        )
+        csr_link.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        csr_link.SetHoverColour(self.hyperlink_colour)
+        csr_link.SetNormalColour(self.hyperlink_colour)
+        csr_link.SetVisitedColour(self.hyperlink_colour)
+        link_row.Add(csr_link, 0, wx.ALIGN_CENTER_VERTICAL)
+        col.Add(link_row, 0, wx.BOTTOM, 6)
 
-    def on_model_choice(self, event: wx.Event, model_choice: wx.Choice) -> None:
-        """
-        Sets model to use for patching.
-        """
+        if self.constants.custom_sip_value is not None:
+            self.sip_value = int(self.constants.custom_sip_value, 16)
+        elif self.constants.sip_status is True:
+            self.sip_value = 0x00
+        else:
+            self.sip_value = 0x803
 
-        selection = model_choice.GetStringSelection()
+        self.sip_configured_label = wx.StaticText(page, label=f"Currently configured SIP: {hex(self.sip_value)}")
+        self.sip_configured_label.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_BOLD))
+        col.Add(self.sip_configured_label, 0, wx.BOTTOM, 2)
+
+        booted_sip = wx.StaticText(page, label=f"Currently booted SIP: {hex(py_sip_xnu.SipXnu().get_sip_status().value)}")
+        booted_sip.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        col.Add(booted_sip, 0, wx.BOTTOM, 8)
+
+        grid = wx.GridSizer(cols=2, vgap=4, hgap=16)
+        for sip_bit, meta in sip_data.system_integrity_protection.csr_values_extended.items():
+            cb = wx.CheckBox(page, label=meta["name"].split("CSR_")[1])
+            cb.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+            cb.SetToolTip(f"Description: {meta['description']}\nValue: {hex(meta['value'])}\nIntroduced in: macOS {meta['introduced_friendly']}")
+            cb.SetValue((self.sip_value & meta["value"]) == meta["value"])
+            cb.Bind(wx.EVT_CHECKBOX, self.on_sip_value)
+            grid.Add(cb, 0, wx.EXPAND)
+        col.Add(grid, 0, wx.EXPAND | wx.BOTTOM, 6)
+
+    def _build_serial_spoofing(self, page: wx.Window, col: wx.BoxSizer) -> None:
+        row = wx.FlexGridSizer(cols=2, vgap=4, hgap=12)
+        row.AddGrowableCol(0, 1)
+        row.AddGrowableCol(1, 1)
+
+        sn_lbl = wx.StaticText(page, label="Custom Serial Number")
+        sn_lbl.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_BOLD))
+        mlb_lbl = wx.StaticText(page, label="Custom Board Serial Number")
+        mlb_lbl.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_BOLD))
+        row.Add(sn_lbl)
+        row.Add(mlb_lbl)
+
+        self.custom_serial_number_textbox = wx.TextCtrl(page, value=self.constants.custom_serial_number, size=(195, -1))
+        self.custom_serial_number_textbox.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        self.custom_serial_number_textbox.SetToolTip('Used when SMBIOS Spoof Level includes serial spoofing.')
+        self.custom_serial_number_textbox.Bind(wx.EVT_TEXT, self.on_custom_serial_number_textbox)
+
+        self.custom_board_serial_number_textbox = wx.TextCtrl(page, value=self.constants.custom_board_serial_number, size=(195, -1))
+        self.custom_board_serial_number_textbox.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        self.custom_board_serial_number_textbox.SetToolTip('Used when SMBIOS Spoof Level includes board serial spoofing.')
+        self.custom_board_serial_number_textbox.Bind(wx.EVT_TEXT, self.on_custom_board_serial_number_textbox)
+
+        row.Add(self.custom_serial_number_textbox, 0, wx.EXPAND)
+        row.Add(self.custom_board_serial_number_textbox, 0, wx.EXPAND)
+        col.Add(row, 0, wx.EXPAND | wx.BOTTOM, 8)
+
+        gen_btn = wx.Button(page, label=f"Generate S/N: {self.constants.custom_model or self.constants.computer.real_model}", size=(210, 28))
+        gen_btn.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        gen_btn.Bind(wx.EVT_BUTTON, self.on_generate_serial_number)
+        col.Add(gen_btn, 0, wx.BOTTOM, 6)
+
+    def _build_app_stats(self, page: wx.Window, col: wx.BoxSizer) -> None:
+        lines = (
+            f"Application Information:\n"
+            f"    Application Version: {self.constants.patcher_version}\n"
+            f"    PatcherSupportPkg Version: {self.constants.patcher_support_pkg_version}\n"
+            f"    Application Path: {self.constants.launcher_binary}\n"
+            f"    Application Mount: {self.constants.payload_path}\n\n"
+            f"Commit Information:\n"
+            f"    Branch: {self.constants.commit_info[0]}\n"
+            f"    Date: {self.constants.commit_info[1]}\n"
+            f"    URL: {self.constants.commit_info[2] or 'N/A'}\n\n"
+            f"Booted Information:\n"
+            f"    Booted OS: XNU {self.constants.detected_os} ({self.constants.detected_os_version})\n"
+            f"    Booted Patcher Version: {self.constants.computer.oclp_version}\n"
+            f"    Booted OpenCore Version: {self.constants.computer.opencore_version}\n"
+            f"    Booted OpenCore Disk: {self.constants.booted_oc_disk}\n\n"
+            f"Hardware Information:\n    {pprint.pformat(self.constants.computer, indent=4)}\n"
+        )
+        self.app_stats = wx.TextCtrl(page, value=lines, size=(-1, 190), style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_RICH2)
+        self.app_stats.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        col.Add(self.app_stats, 0, wx.EXPAND | wx.BOTTOM, 8)
+
+    def on_model_choice(self, event: wx.Event) -> None:
+        selection = self.model_choice.GetStringSelection()
         if selection == "Host Model":
             selection = self.constants.computer.real_model
             self.constants.custom_model = None
@@ -878,229 +682,78 @@ class SettingsFrame(wx.Frame):
             self.constants.custom_model = selection
             defaults.GenerateDefaults(self.constants.custom_model, False, self.constants)
 
-        self.parent.build_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
-        self.parent.model_label.SetLabel(f"Model: {selection}")
-        self.parent.model_label.Centre(wx.HORIZONTAL)
+        self.oc_settings_changed = True
+        can_build = gui_support.CheckProperties(self.constants).host_can_build()
+        self.rebuild_button.Enable(can_build)
+        if hasattr(self.app, "refresh_menu"):
+            self.app.refresh_menu()
 
-        self.frame_modal.Destroy()
-        SettingsFrame(
-            parent=self.parent,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.parent.GetPosition(),
-            oc_settings_changed=True,
-        )
+        active_cat = self.categories[self.sidebar.GetSelection()] if self.sidebar.GetSelection() != wx.NOT_FOUND else None
+        self._reload_categories(preserve_category=active_cat)
 
+    def _on_checkbox(self, event: wx.Event, category: str, label: str) -> None:
+        cb = event.GetEventObject()
+        value = cb.GetValue()
+        entry = self.settings[category][label]
+        warning_pop = entry.get("warning", "")
 
-    def _populate_sip_settings(self, panel: wx.Frame) -> None:
-
-        horizontal_spacer = 250
-
-        # Look for title on frame
-        sip_title: wx.StaticText = None
-        for child in panel.GetChildren():
-            if child.GetLabel() == "System Integrity Protection":
-                sip_title = child
-                break
-
-
-        # Label: Flip individual bits corresponding to XNU's csr.h
-        # If you're unfamiliar with how SIP works, do not touch this menu
-        sip_label = wx.StaticText(panel, label="Flip individual bits corresponding to", pos=(sip_title.GetPosition()[0] - 20, sip_title.GetPosition()[1] + 30))
-        sip_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-
-        # Hyperlink: csr.h
-        spacer = 1 if self.constants.detected_os >= os_data.os_data.big_sur else 3
-        sip_csr_h = wx.adv.HyperlinkCtrl(panel, id=wx.ID_ANY, label="XNU's csr.h", url="https://github.com/apple-oss-distributions/xnu/blob/xnu-8020.101.4/bsd/sys/csr.h", pos=(sip_label.GetPosition()[0] + sip_label.GetSize()[0] + 4, sip_label.GetPosition()[1] + spacer))
-        sip_csr_h.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        sip_csr_h.SetHoverColour(self.hyperlink_colour)
-        sip_csr_h.SetNormalColour(self.hyperlink_colour)
-        sip_csr_h.SetVisitedColour(self.hyperlink_colour)
-
-        # Label: SIP Status
-        if self.constants.custom_sip_value is not None:
-            self.sip_value = int(self.constants.custom_sip_value, 16)
-        elif self.constants.sip_status is True:
-            self.sip_value = 0x00
-        else:
-            self.sip_value = 0x803
-        sip_configured_label = wx.StaticText(panel, label=f"Currently configured SIP: {hex(self.sip_value)}", pos=(sip_label.GetPosition()[0] + 35, sip_label.GetPosition()[1] + 20))
-        sip_configured_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-        self.sip_configured_label = sip_configured_label
-
-        # Label: SIP Status
-        sip_booted_label = wx.StaticText(panel, label=f"Currently booted SIP: {hex(py_sip_xnu.SipXnu().get_sip_status().value)}", pos=(sip_configured_label.GetPosition()[0], sip_configured_label.GetPosition()[1] + 20))
-        sip_booted_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-
-
-        # SIP toggles
-        entries_per_row = len(sip_data.system_integrity_protection.csr_values) // 2
-        horizontal_spacer = 15
-        vertical_spacer = 25
-        index = 1
-        for sip_bit in sip_data.system_integrity_protection.csr_values_extended:
-            self.sip_checkbox = wx.CheckBox(panel, label=sip_data.system_integrity_protection.csr_values_extended[sip_bit]["name"].split("CSR_")[1], pos = (vertical_spacer, sip_booted_label.GetPosition()[1] + 20 + horizontal_spacer))
-            self.sip_checkbox.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-            self.sip_checkbox.SetToolTip(f'Description: {sip_data.system_integrity_protection.csr_values_extended[sip_bit]["description"]}\nValue: {hex(sip_data.system_integrity_protection.csr_values_extended[sip_bit]["value"])}\nIntroduced in: macOS {sip_data.system_integrity_protection.csr_values_extended[sip_bit]["introduced_friendly"]}')
-
-            if self.sip_value & sip_data.system_integrity_protection.csr_values_extended[sip_bit]["value"] == sip_data.system_integrity_protection.csr_values_extended[sip_bit]["value"]:
-                self.sip_checkbox.SetValue(True)
-
-            horizontal_spacer += 20
-            if index == entries_per_row:
-                horizontal_spacer = 15
-                vertical_spacer += 250
-
-            index += 1
-            self.sip_checkbox.Bind(wx.EVT_CHECKBOX, self.on_sip_value)
-
-
-    def _populate_serial_spoofing_settings(self, panel: wx.Frame) -> None:
-        title: wx.StaticText = None
-        for child in panel.GetChildren():
-            if child.GetLabel() == "Serial Spoofing":
-                title = child
-                break
-
-        # Label: Custom Serial Number
-        custom_serial_number_label = wx.StaticText(panel, label="Custom Serial Number", pos=(title.GetPosition()[0] - 150, title.GetPosition()[1] + 30))
-        custom_serial_number_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-
-        # Textbox: Custom Serial Number
-        custom_serial_number_textbox = wx.TextCtrl(panel, pos=(custom_serial_number_label.GetPosition()[0] - 27, custom_serial_number_label.GetPosition()[1] + 20), size=(200, 25))
-        custom_serial_number_textbox.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        custom_serial_number_textbox.SetToolTip("Enter a custom serial number here. This will be used for the SMBIOS and iMessage.\n\nNote: This will not be used if the \"Use Custom Serial Number\" checkbox is not checked.")
-        custom_serial_number_textbox.Bind(wx.EVT_TEXT, self.on_custom_serial_number_textbox)
-        custom_serial_number_textbox.SetValue(self.constants.custom_serial_number)
-        self.custom_serial_number_textbox = custom_serial_number_textbox
-
-        # Label: Custom Board Serial Number
-        custom_board_serial_number_label = wx.StaticText(panel, label="Custom Board Serial Number", pos=(title.GetPosition()[0] + 120, custom_serial_number_label.GetPosition()[1]))
-        custom_board_serial_number_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_BOLD))
-
-        # Textbox: Custom Board Serial Number
-        custom_board_serial_number_textbox = wx.TextCtrl(panel, pos=(custom_board_serial_number_label.GetPosition()[0] - 5, custom_serial_number_textbox.GetPosition()[1]), size=(200, 25))
-        custom_board_serial_number_textbox.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        custom_board_serial_number_textbox.SetToolTip("Enter a custom board serial number here. This will be used for the SMBIOS and iMessage.\n\nNote: This will not be used if the \"Use Custom Board Serial Number\" checkbox is not checked.")
-        custom_board_serial_number_textbox.Bind(wx.EVT_TEXT, self.on_custom_board_serial_number_textbox)
-        custom_board_serial_number_textbox.SetValue(self.constants.custom_board_serial_number)
-        self.custom_board_serial_number_textbox = custom_board_serial_number_textbox
-
-        # Button: Generate Serial Number (below)
-        generate_serial_number_button = wx.Button(panel, label=f"Generate S/N: {self.constants.custom_model or self.constants.computer.real_model}", pos=(title.GetPosition()[0] - 30, custom_board_serial_number_label.GetPosition()[1] + 60), size=(200, 25))
-        generate_serial_number_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        generate_serial_number_button.Bind(wx.EVT_BUTTON, self.on_generate_serial_number)
-
-
-    def _populate_app_stats(self, panel: wx.Frame) -> None:
-        title: wx.StaticText = None
-        for child in panel.GetChildren():
-            if child.GetLabel() == "Statistics":
-                title = child
-                break
-
-        lines = f"""Application Information:
-    Application Version: {self.constants.patcher_version}
-    PatcherSupportPkg Version: {self.constants.patcher_support_pkg_version}
-    Application Path: {self.constants.launcher_binary}
-    Application Mount: {self.constants.payload_path}
-
-Commit Information:
-    Branch: {self.constants.commit_info[0]}
-    Date: {self.constants.commit_info[1]}
-    URL: {self.constants.commit_info[2] if self.constants.commit_info[2] != "" else "N/A"}
-
-Booted Information:
-    Booted OS: XNU {self.constants.detected_os} ({self.constants.detected_os_version})
-    Booted Patcher Version: {self.constants.computer.oclp_version}
-    Booted OpenCore Version: {self.constants.computer.opencore_version}
-    Booted OpenCore Disk: {self.constants.booted_oc_disk}
-
-Hardware Information:
-    {pprint.pformat(self.constants.computer, indent=4)}
-"""
-        # TextCtrl: properties
-        self.app_stats = wx.TextCtrl(panel, value=lines, pos=(-1, title.GetPosition()[1] + 30), size=(600, 240), style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_RICH2)
-        self.app_stats.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-
-
-    def on_checkbox(self, event: wx.Event, warning_pop: str = "", override_function: bool = False) -> None:
-        """
-        """
-        label = event.GetEventObject().GetLabel()
-        value = event.GetEventObject().GetValue()
-        if warning_pop != "" and value is True:
-            warning = wx.MessageDialog(self.frame_modal, warning_pop, f"Warning: {label}", wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT)
+        if warning_pop and value is True:
+            warning = wx.MessageDialog(self.app, warning_pop, f"Warning: {label}", wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT)
             if warning.ShowModal() == wx.ID_NO:
-                event.GetEventObject().SetValue(not event.GetEventObject().GetValue())
+                cb.SetValue(not value)
                 return
-            if label == "Allow native models":
-                if self.constants.computer.real_model in smbios_data.smbios_dictionary:
-                    if self.constants.detected_os > smbios_data.smbios_dictionary[self.constants.computer.real_model]["Max OS Supported"]:
-                        chassis_type = "aluminum"
-                        if self.constants.computer.real_model in ["MacBook4,1", "MacBook5,2", "MacBook6,1", "MacBook7,1"]:
-                            chassis_type = "plastic"
-                        dlg = wx.MessageDialog(self.frame_modal, f"This model, {self.constants.computer.real_model}, does not natively support macOS {os_data.os_conversion.kernel_to_os(self.constants.detected_os)}, {os_data.os_conversion.convert_kernel_to_marketing_name(self.constants.detected_os)}. The last native OS was macOS {os_data.os_conversion.kernel_to_os(smbios_data.smbios_dictionary[self.constants.computer.real_model]['Max OS Supported'])}, {os_data.os_conversion.convert_kernel_to_marketing_name(smbios_data.smbios_dictionary[self.constants.computer.real_model]['Max OS Supported'])}\n\nToggling this option will break booting on this OS. Are you absolutely certain this is desired?\n\nYou may end up with a nice {chassis_type} brick 🧱", "Are you certain?", wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT)
-                        if dlg.ShowModal() == wx.ID_NO:
-                            event.GetEventObject().SetValue(not event.GetEventObject().GetValue())
-                            return
-        if override_function is True:
-            entry = self.settings[self._find_parent_for_key(label)][label]
+            if label == "Allow native models" and self.constants.computer.real_model in smbios_data.smbios_dictionary:
+                max_os = smbios_data.smbios_dictionary[self.constants.computer.real_model]["Max OS Supported"]
+                if self.constants.detected_os > max_os:
+                    chassis = "plastic" if self.constants.computer.real_model in ["MacBook4,1", "MacBook5,2", "MacBook6,1", "MacBook7,1"] else "aluminum"
+                    dlg = wx.MessageDialog(
+                        self.app,
+                        f"This model ({self.constants.computer.real_model}) does not natively support {os_data.os_conversion.convert_kernel_to_marketing_name(self.constants.detected_os)}. "
+                        f"Last native OS: {os_data.os_conversion.convert_kernel_to_marketing_name(max_os)}.\n\n"
+                        f"Toggling this option will break booting. You may end up with a {chassis} brick.",
+                        "Are you certain?",
+                        wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
+                    )
+                    if dlg.ShowModal() == wx.ID_NO:
+                        cb.SetValue(not value)
+                        return
+
+        if "override_function" in entry:
             if entry["variable"] not in self._APP_ONLY_SETTINGS:
                 self.oc_settings_changed = True
             entry["override_function"](entry["variable"], value, entry.get("constants_variable"))
             return
 
-        self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
+        self._update_setting(entry["variable"], value)
         self.oc_settings_changed = True
         if label == "Allow native models":
             can_build = gui_support.CheckProperties(self.constants).host_can_build()
-            self.parent.build_button.Enable(can_build)
             self.rebuild_button.Enable(can_build)
+            if hasattr(self.app, "refresh_menu"):
+                self.app.refresh_menu()
 
-
-    def on_spinctrl(self, event: wx.Event, label: str) -> None:
-        """
-        """
-        value = event.GetEventObject().GetValue()
-        self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
+    def _on_spinctrl(self, event: wx.Event, category: str, label: str) -> None:
+        self._update_setting(self.settings[category][label]["variable"], event.GetEventObject().GetValue())
         self.oc_settings_changed = True
 
+    def _on_choice(self, event: wx.Event, category: str, label: str) -> None:
+        self._update_setting(self.settings[category][label]["variable"], event.GetString())
+        self.oc_settings_changed = True
 
-    def _update_setting(self, variable, value):
+    def _update_setting(self, variable: str, value) -> None:
         logging.info(f"Updating Local Setting: {variable} = {value}")
         setattr(self.constants, variable, value)
-        tmp_value = value
-        if tmp_value is None:
-            tmp_value = "PYTHON_NONE_VALUE"
-        global_settings.GlobalEnviromentSettings().write_property(f"GUI:{variable}", tmp_value)
+        global_settings.GlobalEnviromentSettings().write_property(f"GUI:{variable}", "PYTHON_NONE_VALUE" if value is None else value)
 
-
-    def _update_global_settings(self, variable, value, global_setting = None):
+    def _update_global_settings(self, variable: str, value, global_setting: str = None) -> None:
         logging.info(f"Updating Global Setting: {variable} = {value}")
-        tmp_value = value
-        if tmp_value is None:
-            tmp_value = "PYTHON_NONE_VALUE"
-        global_settings.GlobalEnviromentSettings().write_property(variable, tmp_value)
+        global_settings.GlobalEnviromentSettings().write_property(variable, "PYTHON_NONE_VALUE" if value is None else value)
         if global_setting is not None:
             self._update_setting(global_setting, value)
 
-
-    def _find_parent_for_key(self, key: str) -> str:
-        for parent in self.settings:
-            if key in self.settings[parent]:
-                return parent
-
-
     def on_sip_value(self, event: wx.Event) -> None:
-        """
-        """
-        dict = sip_data.system_integrity_protection.csr_values_extended[f"CSR_{event.GetEventObject().GetLabel()}"]
-
-        if event.GetEventObject().GetValue() is True:
-            self.sip_value = self.sip_value + dict["value"]
-        else:
-            self.sip_value = self.sip_value - dict["value"]
+        meta = sip_data.system_integrity_protection.csr_values_extended[f"CSR_{event.GetEventObject().GetLabel()}"]
+        self.sip_value = self.sip_value + meta["value"] if event.GetEventObject().GetValue() else self.sip_value - meta["value"]
 
         if hex(self.sip_value) == "0x0":
             self.constants.custom_sip_value = None
@@ -1119,160 +772,85 @@ Hardware Information:
         self.oc_settings_changed = True
         self.sip_configured_label.SetLabel(f"Currently configured SIP: {hex(self.sip_value)}")
 
-    def on_choice(self, event: wx.Event, label: str) -> None:
-        """
-        """
-        value = event.GetString()
-        self._update_setting(self.settings[self._find_parent_for_key(label)][label]["variable"], value)
-        self.oc_settings_changed = True
-
-
     def on_generate_serial_number(self, event: wx.Event) -> None:
-        dlg = wx.MessageDialog(self.frame_modal, "Please take caution when using serial spoofing. This should only be used on machines that were legally obtained and require reserialization.\n\nNote: new serials are only overlayed through OpenCore and are not permanently installed into ROM.\n\nMisuse of this setting can break power management and other aspects of the OS if the system does not need spoofing\n\nDortania does not condone the use of our software on stolen devices.\n\nAre you certain you want to continue?", "Warning", wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT)
+        dlg = wx.MessageDialog(
+            self.app,
+            "Take caution when using serial spoofing. Misuse can break power management.\n\nAre you certain you want to continue?",
+            "Warning",
+            wx.YES_NO | wx.ICON_WARNING | wx.NO_DEFAULT,
+        )
         if dlg.ShowModal() != wx.ID_YES:
             return
 
-        macserial_output = subprocess.run([self.constants.macserial_path, "--generate", "--model", self.constants.custom_model or self.constants.computer.real_model, "--num", "1"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        macserial_output = macserial_output.stdout.decode().strip().split(" | ")
-        if len(macserial_output) == 2:
-            self.custom_serial_number_textbox.SetValue(macserial_output[0])
-            self.custom_board_serial_number_textbox.SetValue(macserial_output[1])
+        output = subprocess.run(
+            [self.constants.macserial_path, "--generate", "--model", self.constants.custom_model or self.constants.computer.real_model, "--num", "1"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        ).stdout.decode().strip().split(" | ")
+        if len(output) == 2:
+            self.custom_serial_number_textbox.SetValue(output[0])
+            self.custom_board_serial_number_textbox.SetValue(output[1])
             self.oc_settings_changed = True
         else:
-            wx.MessageBox(f"Failed to generate serial number:\n\n{macserial_output}", "Error", wx.OK | wx.ICON_ERROR)
-
+            wx.MessageBox(f"Failed to generate serial number:\n\n{output}", "Error", wx.OK | wx.ICON_ERROR)
 
     def on_custom_serial_number_textbox(self, event: wx.Event) -> None:
         self.constants.custom_serial_number = event.GetEventObject().GetValue()
         global_settings.GlobalEnviromentSettings().write_property("GUI:custom_serial_number", self.constants.custom_serial_number)
         self.oc_settings_changed = True
 
-
     def on_custom_board_serial_number_textbox(self, event: wx.Event) -> None:
         self.constants.custom_board_serial_number = event.GetEventObject().GetValue()
         global_settings.GlobalEnviromentSettings().write_property("GUI:custom_board_serial_number", self.constants.custom_board_serial_number)
         self.oc_settings_changed = True
 
-
-    def _populate_fu_override(self, panel: wx.Panel) -> None:
-        gpu_combo_box: wx.Choice = None
-        for child in panel.GetChildren():
-            if isinstance(child, wx.Choice):
-                gpu_combo_box = child
-                break
-
-        gpu_combo_box.Bind(wx.EVT_CHOICE, self.fu_selection_click)
-        if self.constants.fu_status is False:
-            gpu_combo_box.SetStringSelection("Disabled")
-        elif self.constants.fu_arguments is None or self.constants.fu_arguments == "":
-            gpu_combo_box.SetStringSelection("Enabled")
-        else:
-            gpu_combo_box.SetStringSelection("Partial")
-
-
     def fu_selection_click(self, event: wx.Event) -> None:
         self.oc_settings_changed = True
         value = event.GetEventObject().GetStringSelection()
         if value == "Enabled":
-            logging.info("Updating FU Status: Enabled")
-            self.constants.fu_status = True
-            self.constants.fu_arguments = None
-            global_settings.GlobalEnviromentSettings().write_property("GUI:fu_status", True)
-            global_settings.GlobalEnviromentSettings().write_property("GUI:fu_arguments", "PYTHON_NONE_VALUE")
-            return
+            self.constants.fu_status, self.constants.fu_arguments = True, None
+        elif value == "Partial":
+            self.constants.fu_status, self.constants.fu_arguments = True, " -disable_sidecar_mac"
+        else:
+            self.constants.fu_status, self.constants.fu_arguments = False, None
 
-        if value == "Partial":
-            logging.info("Updating FU Status: Partial")
-            self.constants.fu_status = True
-            self.constants.fu_arguments = " -disable_sidecar_mac"
-            global_settings.GlobalEnviromentSettings().write_property("GUI:fu_status", True)
-            global_settings.GlobalEnviromentSettings().write_property("GUI:fu_arguments", " -disable_sidecar_mac")
-            return
-
-        logging.info("Updating FU Status: Disabled")
-        self.constants.fu_status = False
-        self.constants.fu_arguments = None
-        global_settings.GlobalEnviromentSettings().write_property("GUI:fu_status", False)
-        global_settings.GlobalEnviromentSettings().write_property("GUI:fu_arguments", "PYTHON_NONE_VALUE")
-
-
-    def _populate_graphics_override(self, panel: wx.Panel) -> None:
-        gpu_combo_box: wx.Choice = None
-        index = 0
-        for child in panel.GetChildren():
-            if isinstance(child, wx.Choice):
-                if index == 0:
-                    index = index + 1
-                    continue
-                gpu_combo_box = child
-                break
-
-        gpu_combo_box.Bind(wx.EVT_CHOICE, self.gpu_selection_click)
-        gpu_combo_box.SetStringSelection(f"{self.constants.imac_vendor} {self.constants.imac_model}")
-
-        socketed_gpu_models = ["iMac9,1", "iMac10,1", "iMac11,1", "iMac11,2", "iMac11,3", "iMac12,1", "iMac12,2"]
-        if ((not self.constants.custom_model and self.constants.computer.real_model not in socketed_gpu_models) or (self.constants.custom_model and self.constants.custom_model not in socketed_gpu_models)):
-            gpu_combo_box.Disable()
-            return
-
+        global_settings.GlobalEnviromentSettings().write_property("GUI:fu_status", self.constants.fu_status)
+        global_settings.GlobalEnviromentSettings().write_property(
+            "GUI:fu_arguments", "PYTHON_NONE_VALUE" if self.constants.fu_arguments is None else self.constants.fu_arguments
+        )
 
     def gpu_selection_click(self, event: wx.Event) -> None:
         self.oc_settings_changed = True
         gpu_choice = event.GetEventObject().GetStringSelection()
-
         logging.info(f"Updating GPU Selection: {gpu_choice}")
         if "AMD" in gpu_choice:
             self.constants.imac_vendor = "AMD"
             self.constants.metal_build = True
-            if "Polaris" in gpu_choice:
-                self.constants.imac_model = "Polaris"
-            elif "GCN" in gpu_choice:
-                self.constants.imac_model = "GCN"
-            elif "Lexa" in gpu_choice:
-                self.constants.imac_model = "Lexa"
-            elif "Navi" in gpu_choice:
-                self.constants.imac_model = "Navi"
-            else:
-                raise Exception("Unknown GPU Model")
-            global_settings.GlobalEnviromentSettings().write_property("GUI:imac_vendor", "AMD")
-            global_settings.GlobalEnviromentSettings().write_property("GUI:metal_build", True)
+            self.constants.imac_model = gpu_choice.split("AMD ")[1]
             global_settings.GlobalEnviromentSettings().write_property("GUI:imac_model", self.constants.imac_model)
         elif "Nvidia" in gpu_choice:
             self.constants.imac_vendor = "Nvidia"
             self.constants.metal_build = True
-            if "Kepler" in gpu_choice:
-                self.constants.imac_model = "Kepler"
-            elif "GT" in gpu_choice:
-                self.constants.imac_model = "GT"
-            else:
-                raise Exception("Unknown GPU Model")
-            global_settings.GlobalEnviromentSettings().write_property("GUI:imac_vendor", "Nvidia")
-            global_settings.GlobalEnviromentSettings().write_property("GUI:metal_build", True)
+            self.constants.imac_model = gpu_choice.split("Nvidia ")[1]
             global_settings.GlobalEnviromentSettings().write_property("GUI:imac_model", self.constants.imac_model)
         else:
             self.constants.imac_vendor = "None"
             self.constants.metal_build = False
-            global_settings.GlobalEnviromentSettings().write_property("GUI:imac_vendor", "None")
-            global_settings.GlobalEnviromentSettings().write_property("GUI:metal_build", False)
-
+        global_settings.GlobalEnviromentSettings().write_property("GUI:imac_vendor", self.constants.imac_vendor)
+        global_settings.GlobalEnviromentSettings().write_property("GUI:metal_build", self.constants.metal_build)
 
     def on_reset_settings(self, event: wx.Event = None) -> None:
         dlg = wx.MessageDialog(
-            self.frame_modal,
-            "Are you sure you want to reset all OpenCore Legacy Patcher settings back to their defaults?\n\nThis will remove saved overrides in /Users/Shared/.com.dortania.opencore-legacy-patcher.plist.",
-            "Reset Settings?",
+            self.app,
+            gui_strings.SETTINGS["reset_confirm_msg"],
+            gui_strings.SETTINGS["reset_confirm_title"],
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_WARNING,
         )
         if dlg.ShowModal() != wx.ID_YES:
             return
 
         if not global_settings.GlobalEnviromentSettings().reset_settings(preserve_keys=["FirstLaunchWelcomeShown"]):
-            wx.MessageDialog(
-                self.frame_modal,
-                "Failed to reset settings file. Check permissions on /Users/Shared/.com.dortania.opencore-legacy-patcher.plist.",
-                "Error",
-                wx.OK | wx.ICON_ERROR,
-            ).ShowModal()
+            wx.MessageDialog(self.app, gui_strings.SETTINGS["reset_error_msg"], "Error", wx.OK | wx.ICON_ERROR).ShowModal()
             return
 
         logging.info("Resetting settings to hardware defaults")
@@ -1282,108 +860,79 @@ Hardware Information:
 
         defaults.GenerateDefaults(self.constants.computer.real_model, True, self.constants, ignore_settings_file=True)
 
-        self.parent.build_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
-        self.parent.model_label.SetLabel(f"Model: {self.constants.computer.real_model}")
-        self.parent.model_label.Centre(wx.HORIZONTAL)
+        self.oc_settings_changed = True
+        self.model_choice.SetSelection(self.model_choice.FindString("Host Model"))
+        self.rebuild_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
+        if hasattr(self.app, "refresh_menu"):
+            self.app.refresh_menu()
 
-        self.frame_modal.Destroy()
-        SettingsFrame(
-            parent=self.parent,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.parent.GetPosition(),
-            oc_settings_changed=True,
-        )
-
+        active_cat = self.categories[self.sidebar.GetSelection()] if self.sidebar.GetSelection() != wx.NOT_FOUND else None
+        self._reload_categories(preserve_category=active_cat)
 
     def on_rebuild_opencore(self, event: wx.Event = None) -> None:
-        if not gui_support.CheckProperties(self.constants).host_can_build():
-            return
-        self.frame_modal.Destroy()
-        if hasattr(self.parent, "on_build_and_install"):
-            self.parent.on_build_and_install()
-        else:
-            from . import gui_build
-            gui_build.BuildFrame(
-                parent=None,
-                title=self.title,
-                global_constants=self.constants,
-                screen_location=self.parent.GetPosition() if self.parent else None,
-            )
+        if gui_support.CheckProperties(self.constants).host_can_build():
+            self.app.navigate("build")
 
-
-    def on_return(self, event: wx.Event = None):
+    def on_return(self, event: wx.Event = None) -> None:
         if self.oc_settings_changed and gui_support.CheckProperties(self.constants).host_can_build():
             dlg = wx.MessageDialog(
-                self.frame_modal,
-                "OpenCore build settings were modified.\n\nWould you like to apply these settings and rebuild OpenCore now?",
-                "Rebuild OpenCore?",
+                self.app,
+                gui_strings.SETTINGS["rebuild_prompt_msg"],
+                gui_strings.SETTINGS["rebuild_prompt_title"],
                 wx.YES_NO | wx.ICON_QUESTION,
             )
             if dlg.ShowModal() == wx.ID_YES:
                 self.on_rebuild_opencore()
                 return
-        self.frame_modal.Destroy()
-
+        self.app.go_home()
 
     def on_nightly(self, event: wx.Event) -> None:
-        # Ask prompt for which branch
         branches = ["main"]
         if self.constants.commit_info[0] not in ["Running from source", "Built from source"]:
             branches = [self.constants.commit_info[0].split("/")[-1]]
         result = network_handler.NetworkUtilities().get("https://api.github.com/repos/dortania/OpenCore-Legacy-Patcher/branches")
-        if result is not None:
-            result = result.json()
-            for branch in result:
-                if branch["name"] == "gh-pages":
-                    continue
-                if branch["name"] not in branches:
-                    branches.append(branch["name"])
-
-            with wx.SingleChoiceDialog(self.parent, "Which branch would you like to download?", "Branch Selection", branches) as dialog:
+        branch = branches[0]
+        if result.status_code == 200:
+            for item in result.json():
+                if item["name"] != "gh-pages" and item["name"] not in branches:
+                    branches.append(item["name"])
+            with wx.SingleChoiceDialog(self.app, "Which branch would you like to download?", "Branch Selection", branches) as dialog:
                 if dialog.ShowModal() == wx.ID_CANCEL:
                     return
-
                 branch = dialog.GetStringSelection()
-        else:
-            branch = "main"
 
-        gui_update.UpdateFrame(
-            parent=self.parent,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.parent.GetPosition(),
+        self.app.navigate(
+            "update",
             url=f"https://nightly.link/dortania/OpenCore-Legacy-Patcher/workflows/build-app-wxpython/{branch}/OpenCore-Patcher.pkg.zip",
-            version_label="(Nightly)"
+            version_label="(Nightly)",
         )
 
-
     def on_export_constants(self, event: wx.Event) -> None:
-        # Throw pop up to get save location
-        with wx.FileDialog(self.parent, "Save Constants File", wildcard="JSON files (*.txt)|*.txt", style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT, defaultFile=f"constants-{self.constants.patcher_version}.txt") as fileDialog:
+        with wx.FileDialog(
+            self.app,
+            "Save Constants File",
+            wildcard="Text files (*.txt)|*.txt",
+            style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
+            defaultFile=f"constants-{self.constants.patcher_version}.txt",
+        ) as fileDialog:
             if fileDialog.ShowModal() == wx.ID_CANCEL:
                 return
-
-            # Save the current contents in the file
             pathname = fileDialog.GetPath()
             logging.info(f"Saving constants to {pathname}")
-            with open(pathname, 'w') as file:
-                file.write(pprint.pformat(vars(self.constants), indent=4))
-
+            with open(pathname, "w") as f:
+                f.write(pprint.pformat(vars(self.constants), indent=4))
 
     def on_test_exception(self, event: wx.Event) -> None:
         raise Exception("Test Exception")
 
     def on_mount_root_vol(self, event: wx.Event) -> None:
-        #Don't need to pass model as we're bypassing all logic
-        if sys_patch.PatchSysVolume("",self.constants)._mount_root_vol() == True:
-            wx.MessageDialog(self.parent, "Root Volume Mounted, remember to fix permissions before saving the Root Volume", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
+        if sys_patch.PatchSysVolume("", self.constants)._mount_root_vol() is True:
+            wx.MessageDialog(self.app, "Root Volume Mounted, remember to fix permissions before saving the Root Volume", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
         else:
-            wx.MessageDialog(self.parent, "Root Volume Mount Failed, check terminal output", "Error", wx.OK | wx.ICON_ERROR).ShowModal()
+            wx.MessageDialog(self.app, "Root Volume Mount Failed, check terminal output", "Error", wx.OK | wx.ICON_ERROR).ShowModal()
 
     def on_bless_root_vol(self, event: wx.Event) -> None:
-        #Don't need to pass model as we're bypassing all logic
-        if sys_patch.PatchSysVolume("",self.constants)._rebuild_root_volume() == True:
-            wx.MessageDialog(self.parent, "Root Volume saved, please reboot to apply changes", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
+        if sys_patch.PatchSysVolume("", self.constants)._rebuild_root_volume() is True:
+            wx.MessageDialog(self.app, "Root Volume saved, please reboot to apply changes", "Success", wx.OK | wx.ICON_INFORMATION).ShowModal()
         else:
-            wx.MessageDialog(self.parent, "Root Volume update Failed, check terminal output", "Error", wx.OK | wx.ICON_ERROR).ShowModal()
+            wx.MessageDialog(self.app, "Root Volume update Failed, check terminal output", "Error", wx.OK | wx.ICON_ERROR).ShowModal()

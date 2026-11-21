@@ -1,10 +1,9 @@
 """
-gui_main_menu.py: Generate GUI for main menu
+gui_main_menu.py: Single persistent window shell, Home view, and view router
 """
 
 import wx
 import wx.html2
-
 import sys
 import logging
 import requests
@@ -18,324 +17,337 @@ from html import escape
 from io import BytesIO
 
 from .. import constants
+from ..support import global_settings, updates
+from ..datasets import os_data, css_data
+from ..wx_gui import gui_support, gui_strings, gui_download
 
-from ..support import (
-    global_settings,
-    updates
-)
-from ..datasets import (
-    os_data,
-    css_data
-)
-from ..wx_gui import (
-    gui_build,
-    gui_macos_installer_download,
-    gui_support,
-    gui_help,
-    gui_settings,
-    gui_sys_patch_display,
-    gui_update,
-)
+
+class HomePanel(wx.Panel):
+    """
+    Main menu panel hosted inside the single persistent MainFrame
+    """
+
+    def __init__(self, parent: wx.Window, app, global_constants: constants.Constants) -> None:
+        super().__init__(parent)
+        self.app = app
+        self.constants = global_constants
+        self.build_button: wx.Button = None
+        self.patch_button: wx.Button = None
+        self.model_label: wx.StaticText = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.AddSpacer(14)
+
+        bmp = wx.Bitmap(str(self.constants.icns_resource_path / "OC-Patcher.icns"), wx.BITMAP_TYPE_ICON).ConvertToImage().Rescale(88, 88, wx.IMAGE_QUALITY_HIGH)
+        outer.Add(wx.StaticBitmap(self, bitmap=wx.Bitmap(bmp)), 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 6)
+
+        title = wx.StaticText(self, label=gui_strings.APP_NAME)
+        title.SetFont(gui_support.font_factory(22, wx.FONTWEIGHT_BOLD))
+        outer.Add(title, 0, wx.ALIGN_CENTER_HORIZONTAL)
+
+        nightly = " (Nightly)" if not self.constants.commit_info[0].startswith("refs/tags") else ""
+        ver = wx.StaticText(self, label=f"Version {self.constants.patcher_version}{nightly}")
+        ver.SetFont(gui_support.font_factory(12, wx.FONTWEIGHT_NORMAL))
+        ver.SetForegroundColour(wx.Colour(128, 128, 128))
+        outer.Add(ver, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP, 2)
+
+        model = self.constants.custom_model or self.constants.computer.real_model
+        self.model_label = wx.StaticText(self, label=f"Model: {model}", size=(480, -1), style=wx.ALIGN_CENTER_HORIZONTAL | wx.ST_NO_AUTORESIZE)
+        self.model_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        outer.Add(self.model_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.TOP | wx.BOTTOM, 8)
+
+        # 2x2 Main action grid preserving original workflow familiarity
+        grid = wx.GridSizer(rows=2, cols=2, vgap=14, hgap=18)
+        cards = [
+            (
+                "build",
+                gui_strings.MAIN_MENU["build_title"],
+                gui_strings.MAIN_MENU["build_desc"],
+                str(self.constants.icns_resource_path / "OC-Build.icns"),
+                lambda: self.app.navigate("build"),
+            ),
+            (
+                "installer",
+                gui_strings.MAIN_MENU["installer_title"],
+                gui_strings.MAIN_MENU["installer_desc"],
+                str(self.constants.icns_resource_path / "OC-Installer.icns"),
+                lambda: self.app.navigate("installer_choice"),
+            ),
+            (
+                "patch",
+                gui_strings.MAIN_MENU["patch_title"],
+                gui_strings.MAIN_MENU["patch_desc"],
+                str(self.constants.icns_resource_path / "OC-Patch.icns"),
+                lambda: self.app.navigate("sys_patch_display"),
+            ),
+            (
+                "help",
+                gui_strings.MAIN_MENU["help_title"],
+                gui_strings.MAIN_MENU["help_desc"],
+                str(self.constants.icns_resource_path / "OC-Support.icns"),
+                lambda: self.app.navigate("help"),
+            ),
+        ]
+
+        for key, btn_label, desc_text, icon_path, handler in cards:
+            card = wx.Panel(self)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            ibmp = wx.Bitmap(icon_path, wx.BITMAP_TYPE_ICON).ConvertToImage().Rescale(52, 52, wx.IMAGE_QUALITY_HIGH)
+            row.Add(wx.StaticBitmap(card, bitmap=wx.Bitmap(ibmp)), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+
+            col = wx.BoxSizer(wx.VERTICAL)
+            btn = wx.Button(card, label=btn_label, size=(195, 30))
+            btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+            btn.Bind(wx.EVT_BUTTON, lambda evt, fn=handler: fn())
+            col.Add(btn, 0, wx.BOTTOM, 4)
+
+            desc = wx.StaticText(card, label=desc_text)
+            desc.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
+            desc.SetForegroundColour(wx.Colour(128, 128, 128))
+            col.Add(desc, 0)
+
+            row.Add(col, 1, wx.ALIGN_CENTER_VERTICAL)
+            card.SetSizer(row)
+            grid.Add(card, 0, wx.EXPAND)
+
+            if key == "build":
+                self.build_button = btn
+            elif key == "patch":
+                self.patch_button = btn
+
+        outer.Add(grid, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 12)
+        outer.AddStretchSpacer(1)
+
+        footer_btns = wx.BoxSizer(wx.HORIZONTAL)
+        settings_btn = wx.Button(self, label=gui_strings.MAIN_MENU["settings"], size=(120, 30))
+        settings_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        settings_btn.Bind(wx.EVT_BUTTON, lambda evt: self.app.navigate("settings"))
+        footer_btns.Add(settings_btn, 0, wx.RIGHT, 12)
+
+        credits_btn = wx.Button(self, label=gui_strings.MAIN_MENU["credits"], size=(120, 30))
+        credits_btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+        credits_btn.Bind(wx.EVT_BUTTON, lambda evt: self.app.navigate("credits"))
+        footer_btns.Add(credits_btn, 0)
+
+        outer.Add(footer_btns, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 8)
+
+        copy_label = wx.StaticText(self, label=self.constants.copyright_date)
+        copy_label.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
+        copy_label.SetForegroundColour(wx.Colour(128, 128, 128))
+        outer.Add(copy_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 12)
+
+        self.SetSizer(outer)
+        self.refresh()
+
+    def refresh(self) -> None:
+        model = self.constants.custom_model or self.constants.computer.real_model
+        self.model_label.SetLabel(f"Model: {model}")
+        if self.build_button is not None:
+            self.build_button.Enable(gui_support.CheckProperties(self.constants).host_can_build())
+        if self.patch_button is not None:
+            self.patch_button.Enable(self.constants.detected_os >= os_data.os_data.big_sur)
+        self.Layout()
+
+
+class WebContentPanel(wx.Panel):
+    """
+    In-window HTML/WebView host for First-Launch Welcome, Credits, and Update Changelog
+    """
+
+    def __init__(
+        self,
+        parent: wx.Window,
+        app,
+        title: str,
+        html_content: str,
+        base_uri: str = "",
+        subtitle: str = "",
+        buttons: list = None,
+        on_nav=None,
+        on_back=None,
+    ) -> None:
+        super().__init__(parent)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(gui_support.PageHeader(self, title, subtitle=subtitle, back_label=gui_strings.NAV["return_main"], on_back=on_back), 0, wx.EXPAND)
+
+        web_view = wx.html2.WebView.New(self, style=wx.BORDER_SUNKEN)
+        web_view.EnableContextMenu(False)
+        web_view.SetPage(html_content, base_uri)
+        if on_nav is not None:
+            web_view.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, on_nav)
+            web_view.Bind(wx.html2.EVT_WEBVIEW_NEWWINDOW, on_nav)
+        outer.Add(web_view, 1, wx.EXPAND | wx.ALL, 12)
+
+        if buttons:
+            btn_row = wx.BoxSizer(wx.HORIZONTAL)
+            for idx, (label, callback, is_default) in enumerate(buttons):
+                btn = wx.Button(self, label=label)
+                btn.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
+                btn.Bind(wx.EVT_BUTTON, lambda evt, cb=callback: cb())
+                if is_default:
+                    btn.SetDefault()
+                btn_row.Add(btn, 0, wx.RIGHT if idx < len(buttons) - 1 else 0, 10)
+            outer.Add(btn_row, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 14)
+
+        self.SetSizer(outer)
 
 
 class MainFrame(wx.Frame):
-    def __init__(self, parent: wx.Frame, title: str, global_constants: constants.Constants, screen_location: tuple = None):
-        logging.info("Initializing Main Menu Frame")
-        super(MainFrame, self).__init__(parent, title=title, size=(600, 400), style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX))
+    """
+    Single persistent 640x520 application window hosting swappable workflow panels
+    """
+
+    WINDOW_SIZE = (640, 520)
+
+    def __init__(
+        self,
+        parent: wx.Frame,
+        title: str,
+        global_constants: constants.Constants,
+        screen_location: tuple = None,
+        initial_view: str = "home",
+        **initial_kwargs,
+    ) -> None:
+        logging.info("Initializing Main Window Shell")
+        super().__init__(
+            parent,
+            title=title,
+            size=self.WINDOW_SIZE,
+            style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
+        )
         gui_support.GenerateMenubar(self, global_constants).generate()
 
-        self.constants: constants.Constants = global_constants
-        self.title: str = title
-
-        self.model_label: wx.StaticText = None
-        self.build_button: wx.Button = None
-
+        self.constants = global_constants
+        self.title = title
+        self._busy_reason = ""
         self.constants.update_stage = gui_support.AutoUpdateStages.INACTIVE
 
-        self._generate_elements()
+        self.book = wx.Simplebook(self)
+        self.home_panel = HomePanel(self.book, app=self, global_constants=self.constants)
+        self.book.AddPage(self.home_panel, "home")
 
-        self.Centre()
+        root_sizer = wx.BoxSizer(wx.VERTICAL)
+        root_sizer.Add(self.book, 1, wx.EXPAND)
+        self.SetSizer(root_sizer)
+
+        self.Bind(wx.EVT_CLOSE, self._on_close)
+        if screen_location:
+            self.SetPosition(screen_location)
+        else:
+            self.Centre()
         self.Show()
 
-
-        if global_settings.GlobalEnviromentSettings().read_property("FirstLaunchWelcomeShown") is not True:
-            wx.CallAfter(self._show_credits, True)
+        if initial_view != "home":
+            self.navigate(initial_view, **initial_kwargs)
+        elif global_settings.GlobalEnviromentSettings().read_property("FirstLaunchWelcomeShown") is not True:
+            wx.CallAfter(self.navigate, "welcome")
         else:
-            self._preflight_checks()
+            wx.CallAfter(self._preflight_checks)
 
+    def set_busy(self, busy: bool, reason: str = "") -> None:
+        self._busy_reason = reason if busy else ""
 
-    def _generate_elements(self) -> None:
-        """
-        Generate UI elements for the main menu
-
-        Format:
-          - Title label: OpenCore Legacy Patcher v{X.Y.Z}
-          - Text:        Model: {Build or Host Model}
-          - Buttons:
-            - Build and Install OpenCore
-            - Post-Install Root Patch
-            - Create macOS Installer
-            - Settings
-            - Help
-          - Text:        Copyright
-        """
-
-        # Logo
-        logo = wx.StaticBitmap(self, bitmap=wx.Bitmap(str(self.constants.icns_resource_path / "OC-Patcher.icns"), wx.BITMAP_TYPE_ICON), pos=(-1, 0), size=(128, 128))
-        logo.Centre(wx.HORIZONTAL)
-
-        # Title label: OpenCore Legacy Patcher v{X.Y.Z}
-        title_label = wx.StaticText(self, label=f"OpenCore Legacy Patcher", pos=(-1, 128))
-        title_label.SetFont(gui_support.font_factory(25, wx.FONTWEIGHT_BOLD))
-        title_label.Centre(wx.HORIZONTAL)
-
-        version_label = wx.StaticText(self, label=f"Version {self.constants.patcher_version}{' (Nightly)' if not self.constants.commit_info[0].startswith('refs/tags') else ''}", pos=(-1, title_label.GetPosition()[1] + 32))
-        version_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        version_label.Centre(wx.HORIZONTAL)
-        version_label.SetForegroundColour(wx.Colour(128, 128, 128))
-
-        # Text: Model: {Build or Host Model}
-        model_label = wx.StaticText(self, label=f"Model: {self.constants.custom_model or self.constants.computer.real_model}", pos=(-1, version_label.GetPosition()[1] + 30))
-        model_label.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        model_label.Centre(wx.HORIZONTAL)
-        self.model_label = model_label
-
-        # Buttons:
-        menu_buttons = {
-            "Build and Install OpenCore": {
-                "function": self.on_build_and_install,
-                "description": [
-                    "Prepares provided drive to be able",
-                    "to boot unsupported OSes.",
-                    "Use on installers or internal drives."
-                ],
-                "icon": str(self.constants.icns_resource_path / "OC-Build.icns"),
-            },
-            "Create macOS Installer": {
-                "function": self.on_create_macos_installer,
-                "description": [
-                    "Download and flash a macOS",
-                    "Installer for your system.",
-                ],
-                "icon": str(self.constants.icns_resource_path / "OC-Installer.icns"),
-            },
-            "⚙️ Settings": {
-                "function": self.on_settings,
-                "description": [
-                ],
-            },
-            "Post-Install Root Patch": {
-                "function": self.on_post_install_root_patch,
-                "description": [
-                    "Installs hardware drivers and",
-                    "patches for your system after",
-                    "installing a new version of macOS.",
-                ],
-                "icon": str(self.constants.icns_resource_path / "OC-Patch.icns"),
-            },
-
-            "Support": {
-                "function": self.on_help,
-                "description": [
-                    "Resources for OpenCore Legacy",
-                    "Patcher.",
-                ],
-                "icon": str(self.constants.icns_resource_path / "OC-Support.icns"),
-            },
-        }
-        button_x = 30
-        button_y = model_label.GetPosition()[1] + 30
-        rollover = len(menu_buttons) / 2
-        if rollover % 1 != 0:
-            rollover = int(rollover) + 1
-        index = 0
-        max_height = 0
-        for button_name, button_function in menu_buttons.items():
-            # place icon
-            if "icon" in button_function:
-                icon = wx.StaticBitmap(self, bitmap=wx.Bitmap(button_function["icon"], wx.BITMAP_TYPE_ICON), pos=(button_x - 10, button_y), size=(64, 64))
-                if button_name == "Post-Install Root Patch":
-                    icon.SetPosition((-1, button_y + 7))
-                if button_name == "Create macOS Installer":
-                    icon.SetPosition((button_x - 5, button_y + 3))
-                if button_name == "Support":
-                    # icon_mac.SetSize((80, 80))
-                    icon.SetPosition((button_x - 7, button_y + 3))
-                if button_name == "Build and Install OpenCore":
-                    icon.SetSize((70, 70))
-            if button_name == "⚙️ Settings":
-                button_y += 5
-
-            button = wx.Button(self, label=button_name, pos=(button_x + 70, button_y), size=(180, 30))
-            button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-            button.Bind(wx.EVT_BUTTON, lambda event, function=button_function["function"]: function(event))
-            button_y += 30
-
-            # # Text: Description
-            description_label = wx.StaticText(self, label='\n'.join(button_function["description"]), pos=(button_x + 75, button.GetPosition()[1] + button.GetSize()[1] + 3))
-            description_label.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
-            # button_y += 15
-
-            for i, line in enumerate(button_function["description"]):
-                if line == "":
-                    continue
-                if i == 0:
-                    button_y += 11
-                else:
-                    button_y += 13
-
-            button_y += 25
-
-            if button_name == "Build and Install OpenCore":
-                self.build_button = button
-                if gui_support.CheckProperties(self.constants).host_can_build() is False:
-                    button.Disable()
-            elif button_name == "Post-Install Root Patch":
-                if self.constants.detected_os < os_data.os_data.big_sur:
-                    button.Disable()
-            elif button_name == "⚙️ Settings":
-                button.SetSize((100, -1))
-                credits_button = wx.Button(self, label="Credits", pos=(-1, button.GetPosition()[1]), size=(100, 30))
-                credits_button.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-                credits_button.Bind(wx.EVT_BUTTON, self.on_credits)
-                button_x_position = (self.GetClientSize()[0] - button.GetSize()[0] - credits_button.GetSize()[0] - 12) // 2
-                button.SetPosition((button_x_position, button.GetPosition()[1]))
-                credits_button.SetPosition((button_x_position + button.GetSize()[0] + 12, button.GetPosition()[1]))
-                description_label.Centre(wx.HORIZONTAL)
-
-            index += 1
-            if index == rollover:
-                max_height = button_y
-                button_x = 320
-                button_y = model_label.GetPosition()[1] + 30
-
-
-        # Text: Copyright
-        copy_label = wx.StaticText(self, label=self.constants.copyright_date, pos=(-1, max_height - 15))
-        copy_label.SetFont(gui_support.font_factory(10, wx.FONTWEIGHT_NORMAL))
-        copy_label.Centre(wx.HORIZONTAL)
-
-        # Set window size
-        self.SetSize((-1, copy_label.GetPosition()[1] + 50))
-
-
-    def _preflight_checks(self):
-        if (
-                self.constants.computer.build_model != None and
-                self.constants.computer.build_model != self.constants.computer.real_model and
-                self.constants.host_is_hackintosh is False
-            ):
-            # Notify user they're booting an unsupported configuration
-            pop_up = wx.MessageDialog(
-                self,
-                f"We found you are currently booting OpenCore built for a different unit: {self.constants.computer.build_model}\n\nWe builds configs to match individual units and cannot be mixed or reused with different Macs.\n\nPlease Build and Install a new OpenCore config, and reboot your Mac.",
-                "Unsupported Configuration Detected!",
-                style=wx.OK | wx.ICON_EXCLAMATION
+    def _on_close(self, event: wx.CloseEvent) -> None:
+        if self._busy_reason:
+            wx.MessageBox(
+                f"Cannot close OpenCore Legacy Patcher while {self._busy_reason} is in progress.",
+                "Operation in Progress",
+                wx.OK | wx.ICON_WARNING,
             )
-            pop_up.ShowModal()
-            self.on_build_and_install()
+            event.Veto()
             return
-
-        if "--update_installed" in sys.argv and self.constants.has_checked_updates is False and gui_support.CheckProperties(self.constants).host_can_build():
-            # Notify user that the update has been installed
-            self.constants.has_checked_updates = True
-            pop_up = wx.MessageDialog(
-                self,
-                f"OpenCore Legacy Patcher has been updated to the latest version: {self.constants.patcher_version}\n\nWould you like to update OpenCore and your root volume patches?",
-                "Update successful!",
-                style=wx.YES_NO | wx.YES_DEFAULT | wx.ICON_INFORMATION
-            )
-            pop_up.ShowModal()
-
-            if pop_up.GetReturnCode() != wx.ID_YES:
-                logging.info("Skipping OpenCore and root volume patch update...")
-                return
-
-
-            logging.info("Updating OpenCore and root volume patches...")
-            self.constants.update_stage = gui_support.AutoUpdateStages.CHECKING
-            self.Hide()
-            pos = self.GetPosition()
-            gui_build.BuildFrame(
-                parent=None,
-                title=self.title,
-                global_constants=self.constants,
-                screen_location=pos
-            )
-            self.Close()
-
-        threading.Thread(target=self._check_for_updates).start()
-
-
-    def _check_for_updates(self):
-        if self.constants.has_checked_updates is True:
-            return
-
-        ignore_updates = global_settings.GlobalEnviromentSettings().read_property("IgnoreAppUpdates")
-        if ignore_updates is True:
-            self.constants.ignore_updates = True
-            return
-
-        self.constants.ignore_updates = False
-        self.constants.has_checked_updates = True
-        dict = updates.CheckBinaryUpdates(self.constants).check_binary_updates()
-        if not dict:
-            return
-
-        version = dict["Version"]
-        logging.info(f"New version: {version}")
-
-        wx.CallAfter(self.on_update, dict["Link"], version, dict["Github Link"])
-
-    def on_build_and_install(self, event: wx.Event = None):
-        self.Hide()
-        gui_build.BuildFrame(
-            parent=None,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetPosition()
-        )
         self.Destroy()
 
+    def _clear_transient_pages(self) -> None:
+        while self.book.GetPageCount() > 1:
+            page = self.book.GetPage(1)
+            self.book.RemovePage(1)
+            page.Destroy()
 
-    def on_post_install_root_patch(self, event: wx.Event = None):
-        gui_sys_patch_display.SysPatchDisplayFrame(
-            parent=self,
-            title=self.title,
+    def go_home(self) -> None:
+        self.book.SetSelection(0)
+        self._clear_transient_pages()
+        self.home_panel.refresh()
+
+    def refresh_menu(self) -> None:
+        self.home_panel.refresh()
+
+    def show_download(self, download_obj, item_name: str, download_icon: str = None, title: str = None) -> bool:
+        panel = gui_download.DownloadPanel(
+            self.book,
+            app=self,
             global_constants=self.constants,
-            screen_location=self.GetPosition()
+            download_obj=download_obj,
+            item_name=item_name,
+            download_icon=download_icon,
+            title=title,
         )
+        self._swap_page(panel, "download")
+        return panel.run()
 
+    def _swap_page(self, panel: wx.Panel, name: str) -> None:
+        # Insert new page before deleting old transient page to avoid flashing home_panel
+        self.book.AddPage(panel, name)
+        new_idx = self.book.GetPageCount() - 1
+        self.book.SetSelection(new_idx)
+        while self.book.GetPageCount() > 2:
+            old = self.book.GetPage(1)
+            self.book.RemovePage(1)
+            old.Destroy()
+        self.Layout()
 
-    def on_create_macos_installer(self, event: wx.Event = None):
-        gui_macos_installer_download.macOSInstallerDownloadFrame(
-            parent=self,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetPosition()
-        )
+    def navigate(self, route: str, **kwargs) -> None:
+        if route == "home":
+            self.go_home()
+            return
 
+        if route == "build":
+            from ..wx_gui import gui_build
+            panel = gui_build.BuildPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "install_oc":
+            from ..wx_gui import gui_install_oc
+            panel = gui_install_oc.InstallOCPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "sys_patch_display":
+            from ..wx_gui import gui_sys_patch_display
+            panel = gui_sys_patch_display.SysPatchDisplayPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "sys_patch_start":
+            from ..wx_gui import gui_sys_patch_start
+            panel = gui_sys_patch_start.SysPatchStartPanel(self.book, app=self, global_constants=self.constants, **kwargs)
+        elif route == "installer_choice":
+            from ..wx_gui import gui_macos_installer_download
+            panel = gui_macos_installer_download.macOSInstallerChoicePanel(self.book, app=self, global_constants=self.constants)
+        elif route == "installer_catalog":
+            from ..wx_gui import gui_macos_installer_download
+            panel = gui_macos_installer_download.macOSInstallerCatalogPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "installer_flash":
+            from ..wx_gui import gui_macos_installer_flash
+            panel = gui_macos_installer_flash.macOSInstallerFlashPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "settings":
+            from ..wx_gui import gui_settings
+            panel = gui_settings.SettingsPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "help":
+            from ..wx_gui import gui_help
+            panel = gui_help.HelpPanel(self.book, app=self, global_constants=self.constants)
+        elif route == "update":
+            from ..wx_gui import gui_update
+            panel = gui_update.UpdatePanel(self.book, app=self, global_constants=self.constants, **kwargs)
+        elif route == "os_cache":
+            from ..wx_gui import gui_cache_os_update
+            panel = gui_cache_os_update.OSCachePanel(self.book, app=self, global_constants=self.constants)
+        elif route in ("welcome", "credits"):
+            panel = self._build_credits_panel(first_launch=(route == "welcome"))
+        elif route == "changelog":
+            panel = self._build_changelog_panel(**kwargs)
+        else:
+            raise ValueError(f"Unknown route: {route}")
 
-    def on_settings(self, event: wx.Event = None):
-        gui_settings.SettingsFrame(
-            parent=self,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetPosition()
-        )
+        self._swap_page(panel, route)
+        if hasattr(panel, "start"):
+            wx.CallAfter(panel.start)
 
-
-    def on_credits(self, event: wx.Event = None):
-        self._show_credits()
-
-
-    def _show_credits(self, first_launch: bool = False):
-        style = wx.DEFAULT_DIALOG_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX)
-        if first_launch:
-            style &= ~wx.CLOSE_BOX
-        dialog = wx.Dialog(self, title="Welcome" if first_launch else "Credits", size=(700, 600), style=style)
-        web_view = wx.html2.WebView.New(dialog)
-        web_view.EnableContextMenu(False)
+    def _build_credits_panel(self, first_launch: bool = False) -> WebContentPanel:
         html_path = Path(__file__).with_name("credits.html")
         logo = wx.Bitmap(str(self.constants.icns_resource_path / "OC-Patcher.icns"), wx.BITMAP_TYPE_ICON).ConvertToImage()
         logo_stream = BytesIO()
@@ -344,127 +356,119 @@ class MainFrame(wx.Frame):
         page = page.replace("{{LOGO}}", b64encode(logo_stream.getvalue()).decode("ascii"))
         page = page.replace("{{VERSION}}", escape(self.constants.patcher_version))
         page = page.replace("{{MODE}}", "welcome" if first_launch else "credits")
-        web_view.SetPage(page, html_path.as_uri())
 
-        def on_navigation(event):
-            if first_launch and event.GetURL() == "oclp://welcome/close":
+        def _dismiss_welcome():
+            global_settings.GlobalEnviromentSettings().write_property("FirstLaunchWelcomeShown", True)
+            self.go_home()
+            wx.CallAfter(self._preflight_checks)
+
+        def _on_nav(event):
+            url = event.GetURL()
+            if first_launch and url == "oclp://welcome/close":
                 event.Veto()
-                global_settings.GlobalEnviromentSettings().write_property("FirstLaunchWelcomeShown", True)
-                wx.CallAfter(dialog.Close)
-            elif event.GetURL().startswith(("https://", "http://")):
+                wx.CallAfter(_dismiss_welcome)
+            elif url.startswith(("https://", "http://")):
                 event.Veto()
-                webbrowser.open(event.GetURL())
+                webbrowser.open(url)
 
-        def on_close(event):
-            dialog.Destroy()
-            if first_launch and self:
-                wx.CallAfter(self._preflight_checks)
-
-        web_view.Bind(wx.html2.EVT_WEBVIEW_NAVIGATING, on_navigation)
-        web_view.Bind(wx.html2.EVT_WEBVIEW_NEWWINDOW, on_navigation)
-        dialog.Bind(wx.EVT_CLOSE, on_close)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(web_view, 1, wx.EXPAND | wx.ALL, 10)
-        if first_launch:
-            dialog.SetEscapeId(wx.ID_NONE)
-        else:
-            close_button = wx.Button(dialog, wx.ID_CLOSE, label="Close")
-            close_button.Bind(wx.EVT_BUTTON, lambda event: dialog.Close())
-            close_button.SetDefault()
-            dialog.SetEscapeId(wx.ID_CLOSE)
-            sizer.Add(close_button, 0, wx.ALIGN_CENTER | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-        dialog.SetSizer(sizer)
-        dialog.CentreOnParent()
-        dialog.ShowWindowModal()
-
-
-    def on_help(self, event: wx.Event = None):
-        gui_help.HelpFrame(
-            parent=self,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetPosition()
+        title = gui_strings.MAIN_MENU["welcome_title"] if first_launch else gui_strings.MAIN_MENU["credits_title"]
+        buttons = [] if first_launch else [(gui_strings.NAV["close"], self.go_home, True)]
+        return WebContentPanel(
+            self.book,
+            app=self,
+            title=title,
+            html_content=page,
+            base_uri=html_path.as_uri(),
+            buttons=buttons,
+            on_nav=_on_nav,
+            on_back=None if first_launch else self.go_home,
         )
 
-    def on_update(self, oclp_url: str, oclp_version: str, oclp_github_url: str):
-
-        ID_GITHUB = wx.NewId()
-        ID_UPDATE = wx.NewId()
-
+    def _build_changelog_panel(self, oclp_url: str, oclp_version: str, oclp_github_url: str) -> WebContentPanel:
         url = "https://api.github.com/repos/dortania/OpenCore-Legacy-Patcher/releases/latest"
-        response = requests.get(url).json()
         try:
+            response = requests.get(url, timeout=10).json()
             changelog = response["body"].split("## Asset Information")[0]
-        except: #if user constantly checks for updates, github will rate limit them
-            changelog = """## Unable to fetch changelog
+        except Exception:
+            changelog = gui_strings.MAIN_MENU["changelog_unavailable"]
 
-Please check the Github page for more information about this release."""
-
-        html_markdown = markdown2.markdown(changelog, extras=["tables"])
-        html_css = css_data.updater_css
-        frame = wx.Dialog(None, -1, title="", size=(650, 500))
-        frame.SetMinSize((650, 500))
-        frame.SetWindowStyle(wx.STAY_ON_TOP)
-        panel = wx.Panel(frame)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.AddSpacer(10)
-        self.title_text = wx.StaticText(panel, label="A new version of OpenCore Legacy Patcher is available!")
-        self.description = wx.StaticText(panel, label=f"OpenCore Legacy Patcher {oclp_version} is now available - You have {self.constants.patcher_version}{' (Nightly)' if not self.constants.commit_info[0].startswith('refs/tags') else ''}. Would you like to update?")
-        self.title_text.SetFont(gui_support.font_factory(19, wx.FONTWEIGHT_BOLD))
-        self.description.SetFont(gui_support.font_factory(13, wx.FONTWEIGHT_NORMAL))
-        self.web_view = wx.html2.WebView.New(panel, style=wx.BORDER_SUNKEN)
-        html_code = f'''
-<html>
-    <head>
-        <style>
-            {html_css}
-        </style>
-    </head>
-    <body class="markdown-body">
-        {html_markdown.replace("<a href=", "<a target='_blank' href=")}
-    </body>
-</html>
-'''
-        self.web_view.SetPage(html_code, "")
-        self.web_view.Bind(wx.html2.EVT_WEBVIEW_NEWWINDOW, self._onWebviewNav)
-        self.web_view.EnableContextMenu(False)
-        self.close_button = wx.Button(panel, label="Dismiss")
-        self.close_button.Bind(wx.EVT_BUTTON, lambda event: frame.EndModal(wx.ID_CANCEL))
-        self.view_button = wx.Button(panel, ID_GITHUB, label="View on GitHub")
-        self.view_button.Bind(wx.EVT_BUTTON, lambda event: frame.EndModal(ID_GITHUB))
-        self.install_button = wx.Button(panel, label="Download and Install")
-        self.install_button.Bind(wx.EVT_BUTTON, lambda event: frame.EndModal(ID_UPDATE))
-        self.install_button.SetDefault()
-
-        buttonsizer = wx.BoxSizer(wx.HORIZONTAL)
-        buttonsizer.Add(self.close_button, 0, wx.ALIGN_CENTRE | wx.RIGHT, 5)
-        buttonsizer.Add(self.view_button, 0, wx.ALIGN_CENTRE | wx.LEFT|wx.RIGHT, 5)
-        buttonsizer.Add(self.install_button, 0, wx.ALIGN_CENTRE | wx.LEFT, 5)
-        sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.title_text, 0, wx.ALIGN_CENTRE | wx.TOP, 20)
-        sizer.Add(self.description, 0, wx.ALIGN_CENTRE | wx.BOTTOM, 20)
-        sizer.Add(self.web_view, 1, wx.EXPAND | wx.LEFT|wx.RIGHT, 10)
-        sizer.Add(buttonsizer, 0, wx.ALIGN_RIGHT | wx.ALL, 20)
-        panel.SetSizer(sizer)
-        frame.Centre()
-
-        result = frame.ShowModal()
-
-
-        if result == ID_GITHUB:
-            webbrowser.open(oclp_github_url)
-        elif result == ID_UPDATE:
-            gui_update.UpdateFrame(
-            parent=self,
-            title=self.title,
-            global_constants=self.constants,
-            screen_location=self.GetPosition(),
-            url=oclp_url,
-            version_label=oclp_version
+        html_markdown = markdown2.markdown(changelog, extras=["tables"]).replace("<a href=", "<a target='_blank' href=")
+        nightly = " (Nightly)" if not self.constants.commit_info[0].startswith("refs/tags") else ""
+        html_code = (
+            f"<html><head><style>{css_data.updater_css}</style></head>"
+            f"<body class='markdown-body'>{html_markdown}</body></html>"
+        )
+        subtitle = gui_strings.MAIN_MENU["update_available_desc"].format(
+            new_version=oclp_version,
+            current_version=f"{self.constants.patcher_version}{nightly}",
         )
 
-        frame.Destroy()
+        def _on_nav(event):
+            target = event.GetURL()
+            if target.startswith(("https://", "http://")):
+                event.Veto()
+                webbrowser.open(target)
 
-    def _onWebviewNav(self, event):
-        url = event.GetURL()
-        webbrowser.open(url)
+        return WebContentPanel(
+            self.book,
+            app=self,
+            title=gui_strings.MAIN_MENU["update_available_title"],
+            subtitle=subtitle,
+            html_content=html_code,
+            buttons=[
+                (gui_strings.MAIN_MENU["dismiss"], self.go_home, False),
+                (gui_strings.MAIN_MENU["view_github"], lambda: webbrowser.open(oclp_github_url), False),
+                (gui_strings.MAIN_MENU["download_install"], lambda: self.navigate("update", url=oclp_url, version_label=oclp_version), True),
+            ],
+            on_nav=_on_nav,
+            on_back=self.go_home,
+        )
+
+    def _preflight_checks(self) -> None:
+        if (
+            self.constants.computer.build_model is not None
+            and self.constants.computer.build_model != self.constants.computer.real_model
+            and self.constants.host_is_hackintosh is False
+        ):
+            wx.MessageDialog(
+                self,
+                gui_strings.MAIN_MENU["unsupported_config_msg"].format(build_model=self.constants.computer.build_model),
+                gui_strings.MAIN_MENU["unsupported_config_title"],
+                style=wx.OK | wx.ICON_EXCLAMATION,
+            ).ShowModal()
+            self.navigate("build")
+            return
+
+        if "--update_installed" in sys.argv and self.constants.has_checked_updates is False and gui_support.CheckProperties(self.constants).host_can_build():
+            self.constants.has_checked_updates = True
+            pop = wx.MessageDialog(
+                self,
+                gui_strings.MAIN_MENU["post_update_msg"].format(version=self.constants.patcher_version),
+                gui_strings.MAIN_MENU["post_update_title"],
+                style=wx.YES_NO | wx.YES_DEFAULT | wx.ICON_INFORMATION,
+            )
+            if pop.ShowModal() != wx.ID_YES:
+                logging.info("Skipping OpenCore and root volume patch update...")
+                return
+            logging.info("Updating OpenCore and root volume patches...")
+            self.constants.update_stage = gui_support.AutoUpdateStages.CHECKING
+            self.navigate("build")
+            return
+
+        threading.Thread(target=self._check_for_updates, daemon=True).start()
+
+    def _check_for_updates(self) -> None:
+        if self.constants.has_checked_updates is True:
+            return
+        if global_settings.GlobalEnviromentSettings().read_property("IgnoreAppUpdates") is True:
+            self.constants.ignore_updates = True
+            return
+
+        self.constants.ignore_updates = False
+        self.constants.has_checked_updates = True
+        info = updates.CheckBinaryUpdates(self.constants).check_binary_updates()
+        if not info:
+            return
+
+        logging.info(f"New version: {info['Version']}")
+        wx.CallAfter(self.navigate, "changelog", oclp_url=info["Link"], oclp_version=info["Version"], oclp_github_url=info["Github Link"])

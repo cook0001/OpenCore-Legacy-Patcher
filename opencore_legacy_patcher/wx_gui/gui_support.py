@@ -10,11 +10,12 @@ import plistlib
 import threading
 import subprocess
 import applescript
+import contextlib
 import packaging.version
 
 from pathlib import Path
 
-from . import gui_about
+from . import gui_about, gui_strings
 
 from .. import constants
 
@@ -102,8 +103,10 @@ class GaugePulseCallback:
         if self.non_metal_alternative is False:
             self.gauge.Pulse()
             return
+        if self.pulse_thread_active:
+            return
         self.pulse_thread_active = True
-        self.pulse_thread = threading.Thread(target=self._pulse)
+        self.pulse_thread = threading.Thread(target=self._pulse, daemon=True)
         self.pulse_thread.start()
 
 
@@ -111,7 +114,8 @@ class GaugePulseCallback:
         if self.non_metal_alternative is False:
             return
         self.pulse_thread_active = False
-        self.pulse_thread.join()
+        if self.pulse_thread and self.pulse_thread.is_alive():
+            self.pulse_thread.join(timeout=1.0)
 
 
     def _pulse(self) -> None:
@@ -317,3 +321,149 @@ class RestartHost:
             except applescript.ScriptError as e:
                 logging.error(f"Error while trying to reboot: {e}")
             sys.exit(0)
+
+
+@contextlib.contextmanager
+def capture_logs(text_box: wx.TextCtrl):
+    """
+    Safely attach ThreadHandler to root logger and always detach that exact handler
+    """
+    logger = logging.getLogger()
+    handler = ThreadHandler(text_box)
+    logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+
+
+class PageHeader(wx.Panel):
+    """
+    Standard top header bar for views inside the single-window shell
+    """
+
+    def __init__(self, parent: wx.Window, title: str, subtitle: str = "", back_label: str = gui_strings.NAV["back"], on_back=None) -> None:
+        super().__init__(parent)
+        outer = wx.BoxSizer(wx.VERTICAL)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+
+        self.back_button = None
+        if on_back is not None:
+            self.back_button = wx.Button(self, label=f"← {back_label}")
+            self.back_button.SetFont(font_factory(12, wx.FONTWEIGHT_NORMAL))
+            self.back_button.Bind(wx.EVT_BUTTON, lambda event: on_back())
+            row.Add(self.back_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
+
+        text_col = wx.BoxSizer(wx.VERTICAL)
+        self.title_label = wx.StaticText(self, label=title)
+        self.title_label.SetFont(font_factory(18, wx.FONTWEIGHT_BOLD))
+        text_col.Add(self.title_label, 0)
+
+        self.subtitle_label = None
+        if subtitle:
+            self.subtitle_label = wx.StaticText(self, label=subtitle)
+            self.subtitle_label.SetFont(font_factory(12, wx.FONTWEIGHT_NORMAL))
+            self.subtitle_label.SetForegroundColour(wx.Colour(128, 128, 128))
+            text_col.Add(self.subtitle_label, 0, wx.TOP, 2)
+
+        row.Add(text_col, 1, wx.ALIGN_CENTER_VERTICAL)
+        outer.Add(row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+        outer.AddSpacer(10)
+        outer.Add(wx.StaticLine(self), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 16)
+        self.SetSizer(outer)
+
+    def set_subtitle(self, subtitle: str) -> None:
+        if self.subtitle_label is not None:
+            self.subtitle_label.SetLabel(subtitle)
+
+    def set_back_enabled(self, enabled: bool) -> None:
+        if self.back_button is not None:
+            self.back_button.Enable(enabled)
+
+
+class IndeterminateProgressPanel(wx.Panel):
+    """
+    Reusable indeterminate loading/progress panel
+    """
+
+    def __init__(self, parent: wx.Window, global_constants: constants.Constants, title: str, message: str = "", back_label: str = None, on_back=None) -> None:
+        super().__init__(parent)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        self.header = PageHeader(self, title, back_label=back_label or gui_strings.NAV["return_main"], on_back=on_back)
+        sizer.Add(self.header, 0, wx.EXPAND)
+
+        sizer.AddStretchSpacer(1)
+
+        self.status_label = wx.StaticText(self, label=message, style=wx.ALIGN_CENTER_HORIZONTAL)
+        self.status_label.SetFont(font_factory(14, wx.FONTWEIGHT_NORMAL))
+        sizer.Add(self.status_label, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.LEFT | wx.RIGHT, 30)
+        sizer.AddSpacer(14)
+
+        self.progress_bar = wx.Gauge(self, range=100, size=(340, 24), style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
+        sizer.Add(self.progress_bar, 0, wx.ALIGN_CENTER_HORIZONTAL)
+
+        sizer.AddStretchSpacer(2)
+        self.SetSizer(sizer)
+
+        self._pulse = GaugePulseCallback(global_constants, self.progress_bar)
+        self._pulse.start_pulse()
+
+    def set_message(self, message: str) -> None:
+        self.status_label.SetLabel(message)
+        self.Layout()
+
+    def stop(self) -> None:
+        if self._pulse:
+            self._pulse.stop_pulse()
+
+    def Destroy(self) -> bool:
+        self.stop()
+        return super().Destroy()
+
+
+class LogOutputPanel(wx.Panel):
+    """
+    Reusable log-streaming task view (used for Build, Install OpenCore, Root Patching)
+    """
+
+    def __init__(self, parent: wx.Window, title: str, subtitle: str = "", summary_lines: list = None, primary_label: str = None, on_primary=None, on_back=None) -> None:
+        super().__init__(parent)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+
+        self.header = PageHeader(self, title, subtitle=subtitle, back_label=gui_strings.NAV["return_main"], on_back=on_back)
+        self.header.set_back_enabled(False)
+        sizer.Add(self.header, 0, wx.EXPAND)
+
+        if summary_lines:
+            summary = wx.StaticText(self, label="\n".join(summary_lines))
+            summary.SetFont(font_factory(12, wx.FONTWEIGHT_NORMAL))
+            sizer.Add(summary, 0, wx.LEFT | wx.RIGHT | wx.TOP, 16)
+
+        self.text_box = wx.TextCtrl(self, value="", style=wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_RICH2)
+        self.text_box.SetFont(font_factory(12, wx.FONTWEIGHT_NORMAL))
+        sizer.Add(self.text_box, 1, wx.EXPAND | wx.ALL, 16)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.primary_button = None
+        if primary_label and on_primary is not None:
+            self.primary_button = wx.Button(self, label=primary_label, size=(190, 30))
+            self.primary_button.SetFont(font_factory(13, wx.FONTWEIGHT_NORMAL))
+            self.primary_button.Bind(wx.EVT_BUTTON, lambda event: on_primary())
+            self.primary_button.Disable()
+            btn_row.Add(self.primary_button, 0, wx.RIGHT, 10)
+
+        self.return_button = wx.Button(self, label=gui_strings.NAV["return_main"], size=(180, 30))
+        self.return_button.SetFont(font_factory(13, wx.FONTWEIGHT_NORMAL))
+        if on_back is not None:
+            self.return_button.Bind(wx.EVT_BUTTON, lambda event: on_back())
+        self.return_button.Disable()
+        btn_row.Add(self.return_button, 0)
+
+        sizer.Add(btn_row, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.BOTTOM, 16)
+        self.SetSizer(sizer)
+
+    def finish(self, enable_primary: bool = False) -> None:
+        self.header.set_back_enabled(True)
+        self.return_button.Enable(True)
+        if self.primary_button is not None:
+            self.primary_button.Enable(enable_primary)
