@@ -1,25 +1,29 @@
 # Privacy Policy
 
-OpenCore Legacy Patcher may collect pseudo-anonymized data about the host system and the OpenCore Legacy Patcher application. This data is used to improve the project and to help diagnose issues. The data collected is as follows:
+**Repository:** [https://github.com/cook0001/OpenCore-Legacy-Patcher](https://github.com/cook0001/OpenCore-Legacy-Patcher)  
+**Project Site:** [https://oclp.patchcraft.dev/](https://oclp.patchcraft.dev/)  
+**Legal & Attributions:** [https://patchcraft.dev/legal.html](https://patchcraft.dev/legal.html)
 
-* System's UUID as a SHA1 hash
-  * This is used to identify the system and to prevent duplicate reports
-  * Cannot be used to identify the system without the user providing the UUID
-* Application name and version
-* System's OS version
-* System's model name, GPUs present and firmware vendor
-  * May include more hardware information in the future (ex. CPU, WiFi, etc)
-* General country code of system's reported region
-  * ex. `US`, `CA`, etc
+## Telemetry & Crash Reporting
 
-Identifiable data such as IP addresses, MAC addresses, serial numbers, etc. are not collected.
+Builds produced from this independent fork (`cook0001/OpenCore-Legacy-Patcher`) compile with empty `ANALYTICS_SERVER` and `SITE_KEY` values in `opencore_legacy_patcher/support/analytics_handler.py`. As a result, **no background telemetry, hardware UUIDs, or crash logs are transmitted** to PatchCraft or to Dortania.
 
-In the future, crash logs may also be collected to help with diagnosing issues.
-----------
+## User-Initiated Network Requests
 
-Users who wish to opt-out can do so either via the application's preferences or via the following command:
-```
-defaults write com.dortania.opencore-legacy-patcher DisableCrashAndAnalyticsReporting -bool true
-```
+Network connections occur only when you run actions that fetch external assets or metadata, such as:
 
-To have your data removed, please contact us via our [Discord server](https://discord.gg/rqdPgH8xSN) and provide the UUID of your system.
+- Downloading macOS installers or catalog metadata from Apple Software Update servers
+- Fetching KDK / `MetallibSupportPkg` manifests or release assets from GitHub / upstream Dortania endpoints
+- Checking for repository releases on GitHub
+
+Read-only volunteer diagnostic capture scripts save archives locally on your Mac; nothing is uploaded automatically unless you choose to attach a bundle to a GitHub issue.
+
+## Upstream Attribution & Non-Affiliation
+
+> This product includes software developed by Dortania and OpenCore Legacy Patcher contributors.
+
+This repository is an independent fork of [dortania/OpenCore-Legacy-Patcher](https://github.com/dortania/OpenCore-Legacy-Patcher) governed by the 4-clause BSD license in [LICENSE.txt](LICENSE.txt). It is not affiliated with or endorsed by Dortania or Apple Inc.
+
+## Contact
+
+For privacy or security questions regarding this fork, open an issue or security advisory at [https://github.com/cook0001/OpenCore-Legacy-Patcher/issues](https://github.com/cook0001/OpenCore-Legacy-Patcher/issues).
