@@ -26,4 +26,4 @@ This repository is an independent fork of [dortania/OpenCore-Legacy-Patcher](htt
 
 ## Contact
 
-For privacy or security questions regarding this fork, open an issue or security advisory at [https://github.com/cook0001/OpenCore-Legacy-Patcher/issues](https://github.com/cook0001/OpenCore-Legacy-Patcher/issues).
+For privacy or security questions regarding this fork, email [support@patchcraft.dev](mailto:support@patchcraft.dev) or open an issue / security advisory at [https://github.com/cook0001/OpenCore-Legacy-Patcher/issues](https://github.com/cook0001/OpenCore-Legacy-Patcher/issues).
